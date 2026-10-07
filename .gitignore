@@ -1,1 +1,3 @@
 node_modules/
+dist/*.mcpack
+!dist/bot-colony.mcpack

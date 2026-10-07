@@ -41,12 +41,22 @@ Shared ground rules for every agent working on this repo. The lead updates this 
 - **Do not** modify `package.json`, run `npm init`, or install packages. Node scripts may live in `scripts/`.
 - Stay inside the files your job owns. If you need something outside them, make a local workaround and report it.
 
+## Player decisions (2026-10-07)
+- **No builders.** The project focuses on harvesters and combat.
+- **Every bot is a combat bot first.** Combat (self-defence, per-mob tactics, retreat) is a base layer that every bot inherits; harvesting runs *on top* of it. A threat pre-empts whatever task the bot is running; when the fight ends the task resumes where it left off. Harvester behaviour itself stays as built in Phase 2.
+- **Per-mob tactics for every hostile mob**, e.g. shield up vs creepers, shield + strafe vs skeletons, timed melee vs zombies/spiders. **Warden: always flee.** (Player asked for "stash valuables in an ender chest"; the API exposes no per-player ender-chest inventory, so the fallback is flee, and stash valuables in a colony chest only if one is on the escape route.)
+- **Ore finding is fair:** bots only know about blocks a player could see (exposed to air, or uncovered while digging). No x-ray scans of hidden blocks for prospecting.
+- Harvesters must use the correct tool, track real durability (`minecraft:durability`), and craft a replacement or ask in chat before a tool breaks.
+
+## Survival-rule additions for combat
+- **Equipment moves are allowed** (a player does this in the inventory UI): moving an item the bot already owns between its inventory and an equipment slot (offhand, armour) via `EntityEquippableComponent`. Never create items.
+- Shield blocking = shield in offhand + `isSneaking = true` and/or `useItemInSlot`/`stopUsingItem`. Not yet verified in-game: ship a probe.
+
 ## Phase plan
 1. Walking skeleton — done.
-2. Gatherers
-3. Builders
-4. Commander (rule-based goals → multi-bot task graphs, roles)
-5. Guards (`!defend`, zones, rule-based combat)
-6. Scale and outposts
-7. Learned combat (trained offline in Node, shipped as JS weights)
-8. Persistence
+2. Gatherers — built (commit d2526a2), reviewed as part of Phase 3.
+3. Combat layer (every bot): threat sensing, per-mob playbook, equipment, retreat/flee, `!defend` patrols, pre-empt + resume of tasks. Includes review of Phase 2 gather code.
+4. Harvesters v2: `!mine diamond,coal,iron,copper`, exploration (caves, strip mining), tool tiers, durability + replacement/asking, smelting.
+5. Scale and outposts
+6. Learned combat (trained offline in Node, shipped as JS weights)
+7. Persistence
