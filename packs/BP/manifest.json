@@ -2,9 +2,9 @@
   "format_version": 2,
   "header": {
     "name": "Bot Colony BP",
-    "description": "Bot colony — Phase 1 walking skeleton",
+    "description": "Bot colony — Phase 2 gatherers",
     "uuid": "7aabd2b1-9750-4255-a7f9-bf509062a964",
-    "version": [0, 1, 0],
+    "version": [0, 2, 0],
     "min_engine_version": [1, 26, 50]
   },
   "modules": [
@@ -13,12 +13,12 @@
       "language": "javascript",
       "uuid": "1089f4f2-7c2f-4da0-b492-a9a3d43591be",
       "entry": "scripts/main.js",
-      "version": [0, 1, 0]
+      "version": [0, 2, 0]
     },
     {
       "type": "data",
       "uuid": "8c0d3192-2492-4f28-80d9-1bb797a6a3a5",
-      "version": [0, 1, 0]
+      "version": [0, 2, 0]
     }
   ],
   "dependencies": [

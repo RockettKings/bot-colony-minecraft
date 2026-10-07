@@ -20,6 +20,11 @@ const FAIL_TEXT: Record<TaskFailReason, string> = {
   bot_died: "I died",
   bot_removed: "I was removed",
   error: "something went wrong",
+  // TODO(phase-2, Job 2): final wording (PHASE2-SPEC §Messages)
+  no_source: "nothing left to gather nearby",
+  no_chest: "no colony chest",
+  no_tool: "no tool",
+  inventory_full: "the chest is full",
 };
 
 export const msg = {

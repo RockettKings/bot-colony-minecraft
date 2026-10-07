@@ -103,7 +103,9 @@ export function sameVec(a: Vec3, b: Vec3, eps = 0.01): boolean {
 }
 
 export function taskStr(t: Task | undefined): string {
-  return t ? `${t.id}->${fmt(t.target)} for ${t.issuer.name}` : "none";
+  if (!t) return "none";
+  const what = t.kind === "goto" ? fmt(t.target) : `gather ${t.item} x${t.amount}`; // TODO(phase-2, Job 6)
+  return `${t.id}->${what} for ${t.issuer.name}`;
 }
 
 export function snapStr(): string {

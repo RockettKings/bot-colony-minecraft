@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Colony } from "../src/core/colony/index.js";
 import { fmtNum, fmtPos } from "../src/core/colony/messages.js";
-import type { Command, CoordTriple, Effect, Sender, TaskFailReason, Tick } from "../src/core/types.js";
+import type { Command, CoordTriple, Effect, Sender, Task, TaskFailReason, Tick } from "../src/core/types.js";
 
 // ---------- harness ----------
 
@@ -57,6 +57,8 @@ class H {
 const replies = (fx: Effect[], to?: string) =>
   fx.filter((e): e is Extract<Effect, { kind: "reply" }> => e.kind === "reply" && (to === undefined || e.to === to));
 const texts = (fx: Effect[], to?: string) => replies(fx, to).map((r) => r.text);
+/** Phase 2 widened Task; Phase 1 assertions read goto targets through this. */
+const gotoOf = (t: Task | undefined) => (t?.kind === "goto" ? t : undefined);
 const assigns = (fx: Effect[]) => fx.filter((e): e is Extract<Effect, { kind: "assign" }> => e.kind === "assign");
 const cancels = (fx: Effect[]) => fx.filter((e): e is Extract<Effect, { kind: "cancel" }> => e.kind === "cancel");
 
@@ -204,7 +206,7 @@ describe("goto / come", () => {
     const h = new H();
     h.bots(1);
     const fx = h.cmd(bob, { kind: "come", count: 1 });
-    expect(assigns(fx)[0]?.task.target).toEqual(bob.pos);
+    expect(gotoOf(assigns(fx)[0]?.task)?.target).toEqual(bob.pos);
   });
 
   it("resolves ~ against sender position", () => {
@@ -212,7 +214,7 @@ describe("goto / come", () => {
     h.bots(1);
     const target: CoordTriple = { x: { value: 0, relative: true }, y: { value: 5, relative: false }, z: { value: -3, relative: true } };
     const fx = h.cmd(bob, { kind: "goto", target, count: 1 });
-    expect(assigns(fx)[0]?.task.target).toEqual({ x: 100, y: 5, z: -53 });
+    expect(gotoOf(assigns(fx)[0]?.task)?.target).toEqual({ x: 100, y: 5, z: -53 });
   });
 
   it("count greater than registered bots is an error", () => {
@@ -425,7 +427,7 @@ describe("offers", () => {
     h.goto(bob, 3, 3, 3);
     expect(h.c.snapshot().pendingOffers).toBe(1);
     const fx = h.cmd(bob, { kind: "override" });
-    expect(assigns(fx)[0]?.task.target).toEqual({ x: 3, y: 3, z: 3 });
+    expect(gotoOf(assigns(fx)[0]?.task)?.target).toEqual({ x: 3, y: 3, z: 3 });
   });
 
   it("offers are per player", () => {
@@ -629,8 +631,8 @@ describe("snapshot", () => {
     });
     // mutation of the snapshot must not leak into state
     const t = snap.bots[0]?.task;
-    if (t) t.target.x = 999;
-    expect(h.c.snapshot().bots[0]?.task?.target.x).toBe(1);
+    if (t?.kind === "goto") t.target.x = 999;
+    expect(gotoOf(h.c.snapshot().bots[0]?.task)?.target.x).toBe(1);
   });
 
   it("idle bots have no task key", () => {
@@ -692,7 +694,7 @@ describe("review fixes and uncovered spec bullets", () => {
     h.goto(bob, 2, 2, 2); // offer
     expect(texts(h.goto(bob, 3, 3, 3, 5))).toEqual(["Only 1 bot exists; can't send 5."]);
     expect(h.c.snapshot().pendingOffers).toBe(1);
-    expect(assigns(h.cmd(bob, { kind: "override" }))[0]?.task.target).toEqual({ x: 2, y: 2, z: 2 });
+    expect(gotoOf(assigns(h.cmd(bob, { kind: "override" }))[0]?.task)?.target).toEqual({ x: 2, y: 2, z: 2 });
   });
 
   it("botRegistered releases the pending spawn case-insensitively", () => {

@@ -1,15 +1,13 @@
 // Goto executor: drives one bot body towards one target. Imperative shell around executor-logic.ts.
-import type { GotoTask, TaskFailReason, TaskId, Tick } from "../../core/types.js";
-import type { BotBody } from "../adapter/index.js";
+import type { GotoTask, TaskId, TaskProgress, Tick } from "../../core/types.js";
 import { logInfo } from "../log.js";
+import type { StepResult, TaskExecutor } from "./executor.js";
 import { classifyNav, decide, initGotoState, onNavResult, timeoutTicks, type GotoState } from "./executor-logic.js";
+import type { BotBody } from "./ports.js";
 
-export type StepResult =
-  | { kind: "running" }
-  | { kind: "done" }
-  | { kind: "failed"; reason: TaskFailReason };
+export type { StepResult } from "./executor.js";
 
-export class GotoExecutor {
+export class GotoExecutor implements TaskExecutor {
   readonly taskId: TaskId;
   private state: GotoState | undefined;
   /** Tick of the first step; bounds the wait for a readable start position. */
@@ -30,6 +28,11 @@ export class GotoExecutor {
     const r = this.advance(now);
     if (r.kind !== "running") this.settled = true;
     return r;
+  }
+
+  /** Goto has no progress to report. */
+  progress(): TaskProgress | undefined {
+    return undefined;
   }
 
   /** Stops movement. Idempotent; after this, step() never reports. */

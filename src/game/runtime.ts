@@ -12,8 +12,16 @@ import {
   type Tick,
   type Vec3,
 } from "../core/index.js";
-import { spawnBot, wrapSimulatedPlayer, type BotBody, type SimulatedPlayer } from "./adapter/index.js";
-import { GotoExecutor, type StepResult } from "./bots/goto-executor.js";
+import { spawnBot, wrapSimulatedPlayer, type SimulatedPlayer, type WorkerBody } from "./adapter/index.js";
+import { createWorldPort } from "./adapter/world.js";
+import {
+  DEFAULT_GATHER_CONFIG,
+  createExecutor,
+  type ExecutorContext,
+  type StepResult,
+  type TaskExecutor,
+} from "./bots/executor.js";
+import { EXECUTORS } from "./bots/registry.js";
 import { installChatFrontend } from "./frontends/chat.js";
 import { senderOf } from "./frontends/sender.js";
 import { installSlashFrontend } from "./frontends/slash.js";
@@ -35,9 +43,9 @@ const RESPAWN_RETRY_TICKS = 20;
 const RESPAWN_MAX_ATTEMPTS = 5;
 
 interface BotEntry {
-  body: BotBody;
+  body: WorkerBody;
   name: string;
-  executor?: GotoExecutor;
+  executor?: TaskExecutor;
   /** Set while dead; respawn is attempted from the pump at/after this tick. */
   respawnAt?: Tick;
   respawnAttempts: number;
@@ -168,7 +176,7 @@ class Runtime implements ColonyRuntime {
           logWarn(`${bot.name}: assign while busy with ${bot.executor.taskId}; replacing`);
           bot.executor.cancel();
         }
-        bot.executor = new GotoExecutor(bot.body, fx.task);
+        bot.executor = createExecutor(EXECUTORS, fx.task, contextFor(bot.body));
         return;
       }
       case "cancel": {
@@ -181,6 +189,11 @@ class Runtime implements ColonyRuntime {
       }
       case "spawn":
         return this.spawn(fx.name, fx.near, fx.requestedBy);
+      case "locateChest":
+      case "inspectChest":
+        // TODO(phase-2, Job 6): adapter/world.ts locateChest / readChest -> chestLocated(Failed) / chestInspected.
+        logWarn(`effect ${fx.kind} not implemented yet`);
+        return;
     }
   }
 
@@ -212,7 +225,7 @@ class Runtime implements ColonyRuntime {
     this.register(res.body);
   }
 
-  private register(body: BotBody): void {
+  private register(body: WorkerBody): void {
     this.bots.set(body.id, { body, name: body.name, respawnAttempts: 0 });
     logInfo(`registered bot ${body.name} (${body.id})`);
     this.emit({ kind: "botRegistered", now: now(), botId: body.id, name: body.name });
@@ -317,6 +330,18 @@ class Runtime implements ColonyRuntime {
 }
 
 // ------------------------------------------------------------ helpers
+
+/** Executor context for a bot. The world port is resolved lazily (goto never needs it). */
+function contextFor(body: WorkerBody): ExecutorContext {
+  return {
+    body,
+    world: () => {
+      const dim = body.dimensionId();
+      return dim === undefined ? undefined : createWorldPort(dim);
+    },
+    gather: DEFAULT_GATHER_CONFIG,
+  };
+}
 
 function guard(what: string, fn: () => unknown): void {
   try {

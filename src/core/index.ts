@@ -4,6 +4,7 @@ import { Colony } from "./colony/index.js";
 import type { ColonyConfig, Effect, Sender, Tick } from "./types.js";
 
 export * from "./types.js";
+export * from "./items.js";
 export { Colony } from "./colony/index.js";
 export { isCommand, parseCommand, helpText } from "./commands/index.js";
 

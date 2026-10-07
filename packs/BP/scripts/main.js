@@ -150,6 +150,9 @@ function build(spec2, v) {
       return { kind: "override" };
     case "queue":
       return { kind: "queue" };
+    case "gather":
+    case "chest":
+      throw new Error(`TODO(phase-2, Job 1): build ${spec2.name}`);
   }
 }
 
@@ -200,7 +203,12 @@ var FAIL_TEXT = {
   timeout: "timed out",
   bot_died: "I died",
   bot_removed: "I was removed",
-  error: "something went wrong"
+  error: "something went wrong",
+  // TODO(phase-2, Job 2): final wording (PHASE2-SPEC §Messages)
+  no_source: "nothing left to gather nearby",
+  no_chest: "no colony chest",
+  no_tool: "no tool",
+  inventory_full: "the chest is full"
 };
 var msg = {
   // general
@@ -317,6 +325,10 @@ var Colony = class {
       this.s.lastCommandAt.set(sender2.id, now2);
     }
     switch (c.kind) {
+      case "gather":
+      case "chest":
+        return;
+      // TODO(phase-2, Job 2): cmdGather / cmdChest
       case "status":
         return this.cmdStatus(sender2, c.bot);
       case "spawn":
@@ -384,7 +396,7 @@ var Colony = class {
     this.reply(sender2.id, msg.offerCounts(n, bots.length - busy, busy));
     for (const b of plan.take) {
       const t = b.task;
-      this.reply(sender2.id, msg.offerBusyBot(b.name, t.target, t.issuer.name));
+      this.reply(sender2.id, msg.offerBusyBot(b.name, taskTarget(t), t.issuer.name));
     }
     this.reply(sender2.id, msg.offerHint(this.config.prefix, this.offerSecs()));
   }
@@ -422,7 +434,7 @@ var Colony = class {
       botName: bot.name,
       taskId: task.id
     });
-    this.reply(sender2.id, msg.offerBusyBot(bot.name, task.target, task.issuer.name));
+    this.reply(sender2.id, msg.offerBusyBot(bot.name, taskTarget(task), task.issuer.name));
     this.reply(sender2.id, msg.stopOfferHint(this.config.prefix, this.offerSecs()));
   }
   cmdOverride(sender2, now2) {
@@ -455,7 +467,7 @@ var Colony = class {
       this.cancel(b, "preempted");
       if (old.issuer.id !== sender2.id) {
         requeue.push(old);
-        this.reply(old.issuer.id, msg.reassigned(b.name, sender2.name, old.target));
+        this.reply(old.issuer.id, msg.reassigned(b.name, sender2.name, taskTarget(old)));
       }
       this.assignNew(b, sender2, now2, offer.target);
     }
@@ -509,7 +521,7 @@ var Colony = class {
     this.s.bots.delete(botId);
     if (bot.task) {
       this.s.queue.unshift(bot.task);
-      this.reply(bot.task.issuer.id, msg.botLeftRequeued(bot.name, bot.task.target));
+      this.reply(bot.task.issuer.id, msg.botLeftRequeued(bot.name, taskTarget(bot.task)));
     }
     this.reply("all", msg.left(bot.name, reason));
     this.drainQueue();
@@ -519,7 +531,7 @@ var Colony = class {
     const task = bot?.task;
     if (!bot || !task || task.id !== e.taskId) return;
     bot.task = void 0;
-    const text = e.outcome === "done" ? msg.arrived(task.target) : msg.failed(task.target, e.reason);
+    const text = e.outcome === "done" ? msg.arrived(taskTarget(task)) : msg.failed(taskTarget(task), e.reason);
     this.botSay(bot, task.issuer.id, text);
     this.drainQueue();
   }
@@ -540,7 +552,7 @@ var Colony = class {
       if (b.task) continue;
       const task = this.s.queue.shift();
       this.assign(b, task);
-      this.botSay(b, task.issuer.id, msg.pickingUp(task.target));
+      this.botSay(b, task.issuer.id, msg.pickingUp(taskTarget(task)));
     }
   }
   assignNew(bot, sender2, now2, target) {
@@ -603,14 +615,120 @@ function resolveTarget(c, origin) {
   return { x: r(c.target.x, origin.x), y: r(c.target.y, origin.y), z: r(c.target.z, origin.z) };
 }
 function statusLine(b) {
-  return b.task ? msg.statusGoing(b.name, b.task.target, b.task.issuer.name) : msg.statusIdle(b.name);
+  return b.task ? msg.statusGoing(b.name, taskTarget(b.task), b.task.issuer.name) : msg.statusIdle(b.name);
 }
 function ref(p) {
   return { id: p.id, name: p.name };
 }
 function copyTask(t) {
-  return { ...t, target: { ...t.target }, issuer: { ...t.issuer } };
+  switch (t.kind) {
+    case "goto":
+      return { ...t, target: { ...t.target }, issuer: { ...t.issuer } };
+    case "gather":
+      return { ...t, origin: { ...t.origin }, chest: { ...t.chest, pos: { ...t.chest.pos } }, issuer: { ...t.issuer } };
+  }
 }
+function taskTarget(t) {
+  return t.kind === "goto" ? t.target : t.origin;
+}
+
+// src/core/items.ts
+var MC = "minecraft:";
+var LOG_SPECIES = [
+  "oak",
+  "spruce",
+  "birch",
+  "jungle",
+  "acacia",
+  "dark_oak",
+  "mangrove",
+  "cherry",
+  "pale_oak"
+];
+var LOG_IDS = LOG_SPECIES.map((s) => `${MC}${s}_log`);
+var PLANK_IDS = LOG_SPECIES.map((s) => `${MC}${s}_planks`);
+function logResource(species) {
+  const id = `${MC}${species}_log`;
+  return { key: `${species}_log`, label: `${species}_log`, sources: [id], yields: [id], tool: "axe", requiresTool: false };
+}
+var RESOURCES = {
+  log: { key: "log", label: "logs", sources: LOG_IDS, yields: LOG_IDS, tool: "axe", requiresTool: false },
+  oak_log: logResource("oak"),
+  spruce_log: logResource("spruce"),
+  birch_log: logResource("birch"),
+  jungle_log: logResource("jungle"),
+  acacia_log: logResource("acacia"),
+  dark_oak_log: logResource("dark_oak"),
+  mangrove_log: logResource("mangrove"),
+  cherry_log: logResource("cherry"),
+  pale_oak_log: logResource("pale_oak"),
+  cobblestone: {
+    key: "cobblestone",
+    label: "cobblestone",
+    sources: [`${MC}stone`, `${MC}cobblestone`],
+    yields: [`${MC}cobblestone`],
+    tool: "pickaxe",
+    requiresTool: true
+  },
+  dirt: {
+    key: "dirt",
+    label: "dirt",
+    sources: [`${MC}dirt`, `${MC}grass_block`],
+    yields: [`${MC}dirt`],
+    tool: "shovel",
+    requiresTool: false
+  },
+  sand: { key: "sand", label: "sand", sources: [`${MC}sand`], yields: [`${MC}sand`], tool: "shovel", requiresTool: false },
+  gravel: {
+    key: "gravel",
+    label: "gravel",
+    sources: [`${MC}gravel`],
+    // Gravel sometimes drops flint instead; only gravel counts (flint is picked up but not deposited).
+    yields: [`${MC}gravel`],
+    tool: "shovel",
+    requiresTool: false
+  }
+};
+var CONTAINER_BLOCK_TYPES = [`${MC}chest`, `${MC}trapped_chest`, `${MC}barrel`];
+var CRAFTING_TABLE = `${MC}crafting_table`;
+var STICK = `${MC}stick`;
+var BLOCK_HARDNESS = {
+  ...Object.fromEntries(LOG_IDS.map((id) => [id, 2])),
+  [`${MC}stone`]: 1.5,
+  [`${MC}cobblestone`]: 2,
+  [`${MC}dirt`]: 0.5,
+  [`${MC}grass_block`]: 0.6,
+  [`${MC}sand`]: 0.5,
+  [`${MC}gravel`]: 0.6
+};
+var PLANKS_RECIPES = LOG_SPECIES.map((s) => ({
+  id: `${s}_planks`,
+  output: { typeId: `${MC}${s}_planks`, amount: 4 },
+  ingredients: [{ anyOf: [`${MC}${s}_log`], amount: 1 }],
+  needsTable: false
+}));
+var STICK_RECIPE = {
+  id: "stick",
+  output: { typeId: STICK, amount: 4 },
+  ingredients: [{ anyOf: PLANK_IDS, amount: 2 }],
+  needsTable: false
+};
+var CRAFTING_TABLE_RECIPE = {
+  id: "crafting_table",
+  output: { typeId: CRAFTING_TABLE, amount: 1 },
+  ingredients: [{ anyOf: PLANK_IDS, amount: 4 }],
+  needsTable: false
+};
+var WOODEN_PICKAXE_RECIPE = {
+  id: "wooden_pickaxe",
+  output: { typeId: `${MC}wooden_pickaxe`, amount: 1 },
+  ingredients: [
+    { anyOf: PLANK_IDS, amount: 3 },
+    { anyOf: [STICK], amount: 2 }
+  ],
+  needsTable: true
+};
+var RECIPES = [...PLANKS_RECIPES, STICK_RECIPE, CRAFTING_TABLE_RECIPE, WOODEN_PICKAXE_RECIPE];
 
 // src/core/index.ts
 function createColony(config) {
@@ -728,9 +846,86 @@ function wrapSimulatedPlayer(p, name) {
       } catch (err) {
         logError(`${name}.disconnect failed`, err);
       }
-    }
+    },
+    // ---------------------------------------------------------- Phase 2 (Job 3 implements; see PHASE2-SPEC)
+    // Stubs return the documented failure values so nothing on a Phase 1 path can throw.
+    dimensionId: () => void 0,
+    // TODO(phase-2)
+    lookAtBlock: () => false,
+    // TODO(phase-2)
+    startBreaking: () => false,
+    // TODO(phase-2)
+    stopBreaking: () => void 0,
+    // TODO(phase-2)
+    inventory: () => void 0,
+    // TODO(phase-2)
+    selectedSlot: () => void 0,
+    // TODO(phase-2)
+    selectSlot: () => false,
+    // TODO(phase-2)
+    swapSlots: () => false,
+    // TODO(phase-2)
+    depositSlot: () => ({ ok: false, reason: "error" }),
+    // TODO(phase-2)
+    withdrawSlot: () => ({ ok: false, reason: "error" }),
+    // TODO(phase-2)
+    applyCraft: () => false,
+    // TODO(phase-2)
+    placeFromSlot: () => false
+    // TODO(phase-2)
   };
 }
+
+// src/game/adapter/world.ts
+function createWorldPort(dimensionId) {
+  void dimensionId;
+  throw new Error("TODO(phase-2): createWorldPort");
+}
+
+// src/game/bots/executor.ts
+var DEFAULT_GATHER_CONFIG = {
+  scanRadius: 16,
+  scanHalfHeight: 8,
+  scanLayersPerPump: 2,
+  maxTaskTicks: 12e3,
+  // 10 min
+  maxConsecutiveFailures: 5,
+  breakReach: 4.5,
+  containerReach: 2.5,
+  pickupRadius: 4,
+  pickupTimeoutTicks: 100,
+  dropSettleTicks: 8,
+  reserveSlots: 1,
+  tableSearchRadius: 4
+};
+function createExecutor(registry, task, ctx) {
+  const factory = registry[task.kind];
+  return factory(task, ctx);
+}
+
+// src/game/bots/gather-executor.ts
+var GatherExecutor = class {
+  constructor(task, ctx) {
+    __publicField(this, "task", task);
+    __publicField(this, "ctx", ctx);
+    __publicField(this, "taskId");
+    this.taskId = task.id;
+  }
+  step(now2) {
+    void now2;
+    void this.ctx;
+    throw new Error("TODO(phase-2): GatherExecutor.step");
+  }
+  cancel() {
+  }
+  progress() {
+    return { kind: "gather", delivered: this.task.delivered, held: 0 };
+  }
+  /** Current phase (for tests and logs). */
+  phase() {
+    return "start";
+  }
+};
 
 // src/game/bots/executor-logic.ts
 var ARRIVE_DIST = 1.5;
@@ -824,6 +1019,10 @@ var GotoExecutor = class {
     if (r.kind !== "running") this.settled = true;
     return r;
   }
+  /** Goto has no progress to report. */
+  progress() {
+    return void 0;
+  }
   /** Stops movement. Idempotent; after this, step() never reports. */
   cancel() {
     if (this.settled) return;
@@ -869,6 +1068,12 @@ var GotoExecutor = class {
       }
     }
   }
+};
+
+// src/game/bots/registry.ts
+var EXECUTORS = {
+  goto: (task, ctx) => new GotoExecutor(ctx.body, task),
+  gather: (task, ctx) => new GatherExecutor(task, ctx)
 };
 
 // src/game/frontends/chat.ts
@@ -1099,7 +1304,7 @@ var Runtime = class {
           logWarn(`${bot.name}: assign while busy with ${bot.executor.taskId}; replacing`);
           bot.executor.cancel();
         }
-        bot.executor = new GotoExecutor(bot.body, fx.task);
+        bot.executor = createExecutor(EXECUTORS, fx.task, contextFor(bot.body));
         return;
       }
       case "cancel": {
@@ -1112,6 +1317,10 @@ var Runtime = class {
       }
       case "spawn":
         return this.spawn(fx.name, fx.near, fx.requestedBy);
+      case "locateChest":
+      case "inspectChest":
+        logWarn(`effect ${fx.kind} not implemented yet`);
+        return;
     }
   }
   // ------------------------------------------------------------ effects
@@ -1231,6 +1440,16 @@ var Runtime = class {
     this.emit({ kind: "botRemoved", now: now(), botId: id, reason });
   }
 };
+function contextFor(body) {
+  return {
+    body,
+    world: () => {
+      const dim = body.dimensionId();
+      return dim === void 0 ? void 0 : createWorldPort(dim);
+    },
+    gather: DEFAULT_GATHER_CONFIG
+  };
+}
 function guard(what, fn) {
   try {
     fn();
@@ -2121,7 +2340,9 @@ function sameVec(a, b, eps = 0.01) {
   return Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps && Math.abs(a.z - b.z) <= eps;
 }
 function taskStr(t) {
-  return t ? `${t.id}->${fmt2(t.target)} for ${t.issuer.name}` : "none";
+  if (!t) return "none";
+  const what = t.kind === "goto" ? fmt2(t.target) : `gather ${t.item} x${t.amount}`;
+  return `${t.id}->${what} for ${t.issuer.name}`;
 }
 function snapStr() {
   const s = runtime().snapshot();
@@ -2202,7 +2423,7 @@ function coordHint(test, bot, target) {
 function expectTask(test, id, target, issuer, what) {
   const v = view(id);
   const t = v?.task;
-  if (!t || !sameVec(t.target, target) || t.issuer.name !== issuer) {
+  if (!t || t.kind !== "goto" || !sameVec(t.target, target) || t.issuer.name !== issuer) {
     test.fail(`${what}: expected ${v?.name ?? id} busy going to ${fmt2(target)} for ${issuer}, got ${taskStr(t)}. ${snapStr()}`);
     return void 0;
   }

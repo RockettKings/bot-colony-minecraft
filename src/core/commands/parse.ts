@@ -145,6 +145,9 @@ function build(spec: CommandSpec, v: Values): Command {
       return { kind: "override" };
     case "queue":
       return { kind: "queue" };
+    case "gather":
+    case "chest":
+      throw new Error(`TODO(phase-2, Job 1): build ${spec.name}`);
   }
 }
 

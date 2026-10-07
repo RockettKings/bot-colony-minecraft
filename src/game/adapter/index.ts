@@ -9,32 +9,18 @@
 // except the SimulatedPlayer type re-export needed by ColonyRuntime.adoptBot's signature.
 import { GameMode, type DimensionLocation } from "@minecraft/server";
 import { spawnSimulatedPlayer, type SimulatedPlayer } from "@minecraft/server-gametest";
-import type { Vec3 } from "../../core/index.js";
 import type { NavInfo } from "../bots/executor-logic.js";
+import type { WorkerBody } from "../bots/ports.js";
 import { errText, logError } from "../log.js";
 
 export type { SimulatedPlayer } from "@minecraft/server-gametest";
 
 export type { NavInfo } from "../bots/executor-logic.js";
 
-/** A bot's in-world body. All methods are exception-safe. */
-export interface BotBody {
-  /** Entity id (stable, readable even when invalid). Used as BotId. */
-  readonly id: string;
-  readonly name: string;
-  isValid(): boolean;
-  /** Current feet position, or undefined if it can't be read. */
-  location(): Vec3 | undefined;
-  isOnGround(): boolean;
-  /** Start pathfinding to an absolute location. undefined = the call threw (e.g. not on ground). */
-  navigateTo(target: Vec3): NavInfo | undefined;
-  stop(): void;
-  /** true on success. */
-  respawn(): boolean;
-  disconnect(): void;
-}
+// BotBody / WorkerBody are contracts in src/game/bots/ports.ts (engine-free, so executors are testable).
+export type { BotBody, WorkerBody } from "../bots/ports.js";
 
-export type SpawnResult = { ok: true; body: BotBody } | { ok: false; reason: string };
+export type SpawnResult = { ok: true; body: WorkerBody } | { ok: false; reason: string };
 
 export function spawnBot(where: DimensionLocation, name: string): SpawnResult {
   try {
@@ -49,7 +35,7 @@ export function spawnBot(where: DimensionLocation, name: string): SpawnResult {
 /** Log the 1st failure of a repeating call, then every Nth, so a stuck bot can't flood the content log. */
 const LOG_EVERY = 25;
 
-export function wrapSimulatedPlayer(p: SimulatedPlayer, name: string): BotBody {
+export function wrapSimulatedPlayer(p: SimulatedPlayer, name: string): WorkerBody {
   const id = p.id; // Entity.id is readable even when the entity is invalid
   let navFailures = 0;
   return {
@@ -112,5 +98,19 @@ export function wrapSimulatedPlayer(p: SimulatedPlayer, name: string): BotBody {
         logError(`${name}.disconnect failed`, err);
       }
     },
+    // ---------------------------------------------------------- Phase 2 (Job 3 implements; see PHASE2-SPEC)
+    // Stubs return the documented failure values so nothing on a Phase 1 path can throw.
+    dimensionId: () => undefined, // TODO(phase-2)
+    lookAtBlock: () => false, // TODO(phase-2)
+    startBreaking: () => false, // TODO(phase-2)
+    stopBreaking: () => undefined, // TODO(phase-2)
+    inventory: () => undefined, // TODO(phase-2)
+    selectedSlot: () => undefined, // TODO(phase-2)
+    selectSlot: () => false, // TODO(phase-2)
+    swapSlots: () => false, // TODO(phase-2)
+    depositSlot: () => ({ ok: false, reason: "error" }), // TODO(phase-2)
+    withdrawSlot: () => ({ ok: false, reason: "error" }), // TODO(phase-2)
+    applyCraft: () => false, // TODO(phase-2)
+    placeFromSlot: () => false, // TODO(phase-2)
   };
 }

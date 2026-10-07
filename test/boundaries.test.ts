@@ -69,6 +69,11 @@ describe("module boundaries", () => {
     expect(offenders("src/core", isMinecraft)).toEqual([]);
   });
 
+  it("src/game/bots (executors + pure logic) never imports @minecraft/* or the adapter", () => {
+    // Executors only see ports (src/game/bots/ports.ts), so they are unit-tested against plain fakes.
+    expect(offenders("src/game/bots", (s) => isMinecraft(s) || /(^|\/)adapter(\/|$)/.test(s))).toEqual([]);
+  });
+
   it("only src/game/adapter, src/probes and src/gametests import @minecraft/server-gametest", () => {
     const allowed = ["src/game/adapter/", "src/probes/", "src/gametests/"];
     const found = offenders("src", (s) => s === "@minecraft/server-gametest" || s.startsWith("@minecraft/server-gametest/"));

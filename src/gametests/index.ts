@@ -63,7 +63,7 @@ function coordHint(test: Test, bot: SimulatedPlayer, target: Vector3): string {
 function expectTask(test: Test, id: BotId, target: Vector3, issuer: string, what: string): string | undefined {
   const v = view(id);
   const t = v?.task;
-  if (!t || !sameVec(t.target, target) || t.issuer.name !== issuer) {
+  if (!t || t.kind !== "goto" || !sameVec(t.target, target) || t.issuer.name !== issuer) {
     test.fail(`${what}: expected ${v?.name ?? id} busy going to ${fmt(target)} for ${issuer}, got ${taskStr(t)}. ${snapStr()}`);
     return undefined;
   }

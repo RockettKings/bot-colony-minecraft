@@ -92,6 +92,9 @@ export class Colony {
     }
 
     switch (c.kind) {
+      case "gather":
+      case "chest":
+        return; // TODO(phase-2, Job 2): cmdGather / cmdChest
       case "status":
         return this.cmdStatus(sender, c.bot);
       case "spawn":
@@ -167,7 +170,7 @@ export class Colony {
     this.reply(sender.id, msg.offerCounts(n, bots.length - busy, busy));
     for (const b of plan.take) {
       const t = b.task as Task;
-      this.reply(sender.id, msg.offerBusyBot(b.name, t.target, t.issuer.name));
+      this.reply(sender.id, msg.offerBusyBot(b.name, taskTarget(t), t.issuer.name));
     }
     this.reply(sender.id, msg.offerHint(this.config.prefix, this.offerSecs()));
   }
@@ -209,7 +212,7 @@ export class Colony {
       botName: bot.name,
       taskId: task.id,
     });
-    this.reply(sender.id, msg.offerBusyBot(bot.name, task.target, task.issuer.name));
+    this.reply(sender.id, msg.offerBusyBot(bot.name, taskTarget(task), task.issuer.name));
     this.reply(sender.id, msg.stopOfferHint(this.config.prefix, this.offerSecs()));
   }
 
@@ -248,7 +251,7 @@ export class Colony {
       this.cancel(b, "preempted");
       if (old.issuer.id !== sender.id) {
         requeue.push(old);
-        this.reply(old.issuer.id, msg.reassigned(b.name, sender.name, old.target));
+        this.reply(old.issuer.id, msg.reassigned(b.name, sender.name, taskTarget(old)));
       }
       this.assignNew(b, sender, now, offer.target);
     }
@@ -311,7 +314,7 @@ export class Colony {
     this.s.bots.delete(botId);
     if (bot.task) {
       this.s.queue.unshift(bot.task);
-      this.reply(bot.task.issuer.id, msg.botLeftRequeued(bot.name, bot.task.target));
+      this.reply(bot.task.issuer.id, msg.botLeftRequeued(bot.name, taskTarget(bot.task)));
     }
     this.reply("all", msg.left(bot.name, reason));
     this.drainQueue();
@@ -323,7 +326,7 @@ export class Colony {
     if (!bot || !task || task.id !== e.taskId) return; // stale or unknown: ignore
 
     bot.task = undefined;
-    const text = e.outcome === "done" ? msg.arrived(task.target) : msg.failed(task.target, e.reason);
+    const text = e.outcome === "done" ? msg.arrived(taskTarget(task)) : msg.failed(taskTarget(task), e.reason);
     this.botSay(bot, task.issuer.id, text);
     this.drainQueue();
   }
@@ -347,7 +350,7 @@ export class Colony {
       if (b.task) continue;
       const task = this.s.queue.shift() as Task;
       this.assign(b, task);
-      this.botSay(b, task.issuer.id, msg.pickingUp(task.target));
+      this.botSay(b, task.issuer.id, msg.pickingUp(taskTarget(task)));
     }
   }
 
@@ -431,7 +434,7 @@ function resolveTarget(c: Extract<Command, { kind: "goto" }>, origin: Vec3): Vec
 }
 
 function statusLine(b: BotRecord): string {
-  return b.task ? msg.statusGoing(b.name, b.task.target, b.task.issuer.name) : msg.statusIdle(b.name);
+  return b.task ? msg.statusGoing(b.name, taskTarget(b.task), b.task.issuer.name) : msg.statusIdle(b.name);
 }
 
 function ref(p: PlayerRef): PlayerRef {
@@ -439,5 +442,18 @@ function ref(p: PlayerRef): PlayerRef {
 }
 
 function copyTask(t: Task): Task {
-  return { ...t, target: { ...t.target }, issuer: { ...t.issuer } };
+  switch (t.kind) {
+    case "goto":
+      return { ...t, target: { ...t.target }, issuer: { ...t.issuer } };
+    case "gather":
+      return { ...t, origin: { ...t.origin }, chest: { ...t.chest, pos: { ...t.chest.pos } }, issuer: { ...t.issuer } };
+  }
+}
+
+/**
+ * TODO(phase-2, Job 2): placeholder so Phase 1 compiles with the widened Task union. Replace every use with
+ * per-kind task descriptions (PHASE2-SPEC §Colony: describeTask), then delete this.
+ */
+function taskTarget(t: Task): Vec3 {
+  return t.kind === "goto" ? t.target : t.origin;
 }
