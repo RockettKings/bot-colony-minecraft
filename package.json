@@ -1,0 +1,22 @@
+{
+  "name": "bot-colony",
+  "version": "1.0.0",
+  "description": "Minecraft Bedrock bot colony — Phase 1 walking skeleton",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "pack": "node scripts/build.mjs --pack",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@minecraft/server": "2.11.0-beta.1.26.52-stable",
+    "@minecraft/server-gametest": "1.0.0-beta.1.26.52-stable",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  },
+  "private": true,
+  "type": "module"
+}

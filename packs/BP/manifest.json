@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Bot Colony BP",
+    "description": "Bot colony — Phase 1 walking skeleton",
+    "uuid": "7aabd2b1-9750-4255-a7f9-bf509062a964",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 26, 50]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "1089f4f2-7c2f-4da0-b492-a9a3d43591be",
+      "entry": "scripts/main.js",
+      "version": [0, 1, 0]
+    },
+    {
+      "type": "data",
+      "uuid": "8c0d3192-2492-4f28-80d9-1bb797a6a3a5",
+      "version": [0, 1, 0]
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.11.0-beta" },
+    { "module_name": "@minecraft/server-gametest", "version": "1.0.0-beta" }
+  ]
+}
