@@ -1,4 +1,6 @@
-# Phase 1 spike checklist
+# Spike checklist
+
+Engine questions the code depends on but the type definitions don't settle. Phase 1: §0–6 (probes and runtime checks). Phase 2: §7 (gathering), answered by hand in PLAYTEST §4 G–Q and by the Phase 2 GameTests.
 
 Run on a **play world: Beta APIs on, cheats OFF**, unless noted. Every probe ends with a chat and content-log line of this form:
 `[probe] <name>: RESULT PASS|FAIL|INCONCLUSIVE - <summary>`, usually preceded by a `facts:` line. Paste both lines into **Result**.
@@ -19,6 +21,7 @@ Solo play test 2026-10-06: PLAYTEST sections A, B and E all passed. D (multiplay
 | 4 | reload | `/colony:probe reload` (before and after reopening) | FAIL (2026-10-06): none of 2 simulated players came back after the reload | `survived`, `presentButNotDetectedAsSimulated` |
 | 5 | nav coord frame | `/gametest runset colony` (dev world) | | table in §5 |
 | 6 | runtime checks | see §6 | | table in §6 |
+| 7 | Phase 2 gathering | PLAYTEST §4 I–N, Q | | table in §7 |
 
 ## 0. Startup (automatic)
 
@@ -148,3 +151,20 @@ The code handles each of these defensively (try/catch plus a `[colony]` or `[pro
 
 Notes:
 
+## 7. Phase 2: gathering questions
+
+The Phase 2 code assumes an answer to each of these; none is probed yet. Each has a defensive fallback (poll + timeout, blacklist, typed failure), so a wrong assumption shows up as a failure message, not a hang. Answer them from PLAYTEST §4 and the Phase 2 GameTests (dev world, cheats on).
+
+| # | Question | Assumed | How to answer | If the assumption is wrong | Result |
+|---|---|---|---|---|---|
+| a | **Item pickup (key risk).** Does a survival simulated player pick up item entities it walks over, like a player? There is no pickup API; nothing else collects drops | Yes (AGENT-CONTEXT) | PLAYTEST §4 I; GameTest `colony:gather_logs` (chest ≥ 6 oak_log) | Collect times out, nothing is delivered, every gather ends `0/n`. Phase 2 can't close; look for another legal pickup path (e.g. an engine pickup trigger, or moving onto the exact item position) | |
+| b | **Survival `breakBlock` timing.** Does `SimulatedPlayer.breakBlock(pos, face)` in survival keep hitting until the block breaks, taking about the vanilla time (oak log by hand ≈ 3 s, with a stone axe ≈ 0.75 s; stone with a wooden pickaxe ≈ 1.1 s)? | Yes; the executor polls the block and gives up after 2 × estimate + 2 s | PLAYTEST §4 I (time one log by hand), §4 J (faster with the axe), §4 K | Frequent "gave up" blacklisting, or the bot never finishes a block: re-tune `estimateBreakTicks` / timeout, or re-issue `breakBlock` each pump | |
+| c | **Does the bot have to keep looking at the block?** `lookAtBlock(…, UntilMove)` is called before breaking | Looking once is enough while the bot stands still | Same as (b): watch whether the bot keeps facing the block while swinging | Re-call `lookAtBlock` every pump while breaking | |
+| d | **Reach enforcement.** Does the engine refuse `breakBlock` beyond some reach, or allow any distance? The executor enforces 4.5 blocks from the eye itself | Engine allows ≤ 4.5; the executor never asks for more | Watch for blocks the bot swings at without effect (§4 J); Content Log `[colony] … breakBlock` lines | Lower `breakReach` in `DEFAULT_GATHER_CONFIG` | |
+| e | **Placing with `useItemInSlotOnBlock`.** Does `SimulatedPlayer.useItemInSlotOnBlock(slot, onBlock, Up)` place a crafting table on top of `onBlock` in survival, consuming one item? | Yes; confirmed next pump by reading the block | PLAYTEST §4 K (table appears, item gone); GameTest `colony:gather_cobble_craft` | Pickaxe crafting fails with "no pickaxe and couldn't make one"; try another face / target block, or a different placement API | |
+| f | **Container transfer with cheats off.** `Container.transferItem` / `addItem` / `setItem` between the bot and a chest block work on a cheats-off world, and the counts are exact | Yes | PLAYTEST §4 H, J (chest contents match "Delivered n"), §4 N (chest full) | Deposits fail with "can't reach the colony chest" / wrong counts | |
+| g | **Coordinate frame of `breakBlock` / `lookAtBlock` / `useItemInSlotOnBlock` for test-spawned bots** (like §5 for navigation). Absolute or test-relative? | Unknown, so Phase 2 GameTests spawn bots with the top-level API only | Not tested in Phase 2. To answer later: a GameTest that spawns via `test.spawnSimulatedPlayer` and breaks a known block | Only matters for GameTests; play uses top-level spawns (absolute) | |
+| h | **`getBlocks(…, allowUnloadedChunks = true)`** skips unloaded parts without throwing, and filtering unknown type ids through `BlockTypes.get` avoids throws | Yes | Content Log: no `[colony] findBlocks` errors during §4 J–L; §4 P (walk away mid-task) | Scans fail: bots report "nothing left to gather nearby" with blocks in plain view | |
+| i | **Drops and death.** A bot that dies mid-gather drops its inventory and respawns empty; the task fails "I died" and isn't retried | Yes (Phase 1 death handling, §6 c/h) | PLAYTEST §4 N (death) | Wrong report or a stuck bot | |
+
+Notes:

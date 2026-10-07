@@ -3,29 +3,33 @@
 import {
   DEFAULT_CONFIG,
   type BotId,
+  type ChestRef,
   type ColonyConfig,
   type ColonyEvent,
   type ColonySnapshot,
   type Command,
   type Effect,
-  type GotoTask,
   type PlayerId,
   type PlayerRef,
   type Sender,
   type Task,
+  type TaskProgress,
   type Tick,
   type Vec3,
 } from "../types.js";
+import { RESOURCES } from "../items.js";
 import { COORD_LIMITS } from "../commands/index.js";
 import { planAllocation } from "./allocator.js";
-import { msg } from "./messages.js";
-import { createState, type BotRecord, type ColonyState, type GotoOffer, type Offer } from "./state.js";
+import { msg, resourceLabel, taskActivity, taskNoun } from "./messages.js";
+import { createState, type BotRecord, type ColonyState, type Offer, type TaskOffer, type TaskSpec } from "./state.js";
 
-export { fmtNum, fmtPos, msg } from "./messages.js";
+export { fmtNum, fmtPos, msg, taskActivity, taskNoun } from "./messages.js";
 export { planAllocation } from "./allocator.js";
 
 type CommandEvent = Extract<ColonyEvent, { kind: "command" }>;
 type ReportEvent = Extract<ColonyEvent, { kind: "taskReport" }>;
+type ProgressEvent = Extract<ColonyEvent, { kind: "taskProgress" }>;
+type GatherCommand = Extract<Command, { kind: "gather" }>;
 
 export class Colony {
   readonly config: ColonyConfig;
@@ -58,6 +62,19 @@ export class Colony {
       case "tick":
         this.onTick(e.now);
         break;
+      case "taskProgress":
+        this.onTaskProgress(e);
+        break;
+      case "chestLocated":
+        this.s.chest = copyChest(e.chest);
+        this.reply(e.requestedBy, msg.chestSet(e.chest.pos));
+        break;
+      case "chestLocateFailed":
+        this.reply(e.requestedBy, msg.chestLocateFailed(e.reason, this.config.prefix));
+        break;
+      case "chestInspected":
+        this.reply(e.to, chestLine(e.chest, e.items));
+        break;
     }
     const effects = this.out;
     this.out = [];
@@ -66,13 +83,14 @@ export class Colony {
 
   snapshot(): ColonySnapshot {
     return {
-      bots: this.botList().map((b) =>
-        b.task
-          ? { id: b.id, name: b.name, state: "busy" as const, task: copyTask(b.task) }
-          : { id: b.id, name: b.name, state: "idle" as const },
-      ),
+      bots: this.botList().map((b) => {
+        if (!b.task) return { id: b.id, name: b.name, state: "idle" as const };
+        const view = { id: b.id, name: b.name, state: "busy" as const, task: copyTask(b.task) };
+        return b.progress ? { ...view, progress: { ...b.progress } } : view;
+      }),
       queued: this.s.queue.map(copyTask),
       pendingOffers: this.s.offers.size,
+      ...(this.s.chest ? { chest: copyChest(this.s.chest) } : {}),
     };
   }
 
@@ -93,8 +111,9 @@ export class Colony {
 
     switch (c.kind) {
       case "gather":
+        return this.cmdGather(sender, now, c);
       case "chest":
-        return; // TODO(phase-2, Job 2): cmdGather / cmdChest
+        return this.cmdChest(sender, c.action);
       case "status":
         return this.cmdStatus(sender, c.bot);
       case "spawn":
@@ -146,8 +165,39 @@ export class Colony {
     if (target.y < COORD_LIMITS.minY || target.y > COORD_LIMITS.maxY) {
       return this.reply(sender.id, msg.outOfWorld(target.y, COORD_LIMITS.minY, COORD_LIMITS.maxY));
     }
+    const specs: TaskSpec[] = [];
+    for (let i = 0; i < n; i++) specs.push({ kind: "goto", target: { ...target } });
+    this.request(sender, now, specs);
+  }
+
+  private cmdGather(sender: Sender, now: Tick, c: GatherCommand): void {
+    const chest = this.s.chest;
+    // Rejected requests have no side effects: the player's pending offer survives.
+    if (!chest) return this.reply(sender.id, msg.noChest(this.config.prefix));
+    const n = Math.max(1, Math.min(Math.floor(c.count), c.amount));
+    const specs = splitAmount(c.amount, n).map(
+      (amount): TaskSpec => ({ kind: "gather", item: c.item, amount, origin: { ...sender.pos }, chest: copyChest(chest) }),
+    );
+    this.request(sender, now, specs);
+  }
+
+  private cmdChest(sender: Sender, action: "show" | "set"): void {
+    if (action === "set") {
+      this.out.push({ kind: "locateChest", requestedBy: sender.id, near: { ...sender.pos } });
+      return;
+    }
+    const chest = this.s.chest;
+    if (!chest) return this.reply(sender.id, msg.noChest(this.config.prefix));
+    this.out.push({ kind: "inspectChest", to: sender.id, chest: copyChest(chest) });
+  }
+
+  /**
+   * Shared allocation for every multi-bot task request: one spec per bot. Assigns directly when every bot
+   * to take runs the sender's own task (those are dropped, not requeued); otherwise creates an offer.
+   */
+  private request(sender: Sender, now: Tick, specs: TaskSpec[]): void {
+    const n = specs.length;
     const bots = this.botList();
-    // A rejected request has no side effects: the player's pending offer survives.
     if (bots.length === 0) return this.reply(sender.id, msg.noBots(this.config.prefix));
     if (n > bots.length) return this.reply(sender.id, msg.tooMany(n, bots.length));
     // A valid fresh request supersedes whatever this player had pending.
@@ -156,21 +206,22 @@ export class Colony {
     const plan = planAllocation(bots, n, sender.id);
     const allOwn = plan.take.every((b) => b.task?.issuer.id === sender.id);
     if (allOwn) {
-      for (const b of plan.idle) this.assignNew(b, sender, now, target);
+      let i = 0;
+      for (const b of plan.idle) this.assignNew(b, sender, now, specs[i++] as TaskSpec);
       for (const b of plan.take) {
         // Own task: replaced outright, not requeued.
         this.cancel(b, "preempted");
-        this.assignNew(b, sender, now, target);
+        this.assignNew(b, sender, now, specs[i++] as TaskSpec);
       }
       return;
     }
 
-    this.s.offers.set(sender.id, { kind: "goto", owner: ref(sender), createdAt: now, target, count: n });
+    this.s.offers.set(sender.id, { kind: "task", owner: ref(sender), createdAt: now, specs });
     const busy = bots.filter((b) => b.task).length;
     this.reply(sender.id, msg.offerCounts(n, bots.length - busy, busy));
     for (const b of plan.take) {
       const t = b.task as Task;
-      this.reply(sender.id, msg.offerBusyBot(b.name, taskTarget(t), t.issuer.name));
+      this.reply(sender.id, msg.offerBusyBot(b.name, taskActivity(t, b.progress), t.issuer.name));
     }
     this.reply(sender.id, msg.offerHint(this.config.prefix, this.offerSecs()));
   }
@@ -212,7 +263,7 @@ export class Colony {
       botName: bot.name,
       taskId: task.id,
     });
-    this.reply(sender.id, msg.offerBusyBot(bot.name, taskTarget(task), task.issuer.name));
+    this.reply(sender.id, msg.offerBusyBot(bot.name, taskActivity(task, bot.progress), task.issuer.name));
     this.reply(sender.id, msg.stopOfferHint(this.config.prefix, this.offerSecs()));
   }
 
@@ -233,27 +284,35 @@ export class Colony {
       return;
     }
 
-    this.executeGotoOffer(sender, now, offer);
+    this.executeTaskOffer(sender, now, offer);
   }
 
   /** Re-plans against current state (bots may have freed up or left since the offer). */
-  private executeGotoOffer(sender: Sender, now: Tick, offer: GotoOffer): void {
+  private executeTaskOffer(sender: Sender, now: Tick, offer: TaskOffer): void {
+    const n = offer.specs.length;
     const bots = this.botList();
     if (bots.length === 0) return this.reply(sender.id, msg.noBots(this.config.prefix));
-    if (offer.count > bots.length) return this.reply(sender.id, msg.tooMany(offer.count, bots.length));
+    if (n > bots.length) return this.reply(sender.id, msg.tooMany(n, bots.length));
 
-    const plan = planAllocation(bots, offer.count, sender.id);
-    for (const b of plan.idle) this.assignNew(b, sender, now, offer.target);
+    const plan = planAllocation(bots, n, sender.id);
+    let i = 0;
+    for (const b of plan.idle) this.assignNew(b, sender, now, offer.specs[i++] as TaskSpec);
 
     const requeue: Task[] = [];
     for (const b of plan.take) {
       const old = b.task as Task;
+      const progress = b.progress;
       this.cancel(b, "preempted");
       if (old.issuer.id !== sender.id) {
-        requeue.push(old);
-        this.reply(old.issuer.id, msg.reassigned(b.name, sender.name, taskTarget(old)));
+        const again = requeueable(old, progress);
+        if (again) {
+          requeue.push(again);
+          this.reply(old.issuer.id, msg.reassigned(b.name, sender.name, taskNoun(again)));
+        } else {
+          this.reply(old.issuer.id, msg.reassignedDone(b.name, sender.name, taskNoun(withDelivered(old, progress))));
+        }
       }
-      this.assignNew(b, sender, now, offer.target);
+      this.assignNew(b, sender, now, offer.specs[i++] as TaskSpec);
     }
     // Preempted tasks go to the front, keeping their relative order.
     this.s.queue.unshift(...requeue);
@@ -261,24 +320,21 @@ export class Colony {
 
   private cmdQueue(sender: Sender, now: Tick): void {
     const offer = this.s.offers.get(sender.id);
-    if (!offer || offer.kind !== "goto" || !this.isLive(offer, now)) {
+    if (!offer || offer.kind !== "task" || !this.isLive(offer, now)) {
       if (offer && !this.isLive(offer, now)) this.s.offers.delete(sender.id);
       return this.reply(sender.id, msg.nothingToQueue());
     }
     this.s.offers.delete(sender.id);
 
-    let remaining = offer.count;
+    const specs = [...offer.specs];
     for (const b of this.botList()) {
-      if (remaining === 0) break;
-      if (!b.task) {
-        this.assignNew(b, sender, now, offer.target);
-        remaining--;
-      }
+      if (specs.length === 0) break;
+      if (!b.task) this.assignNew(b, sender, now, specs.shift() as TaskSpec);
     }
-    if (remaining === 0) return;
+    if (specs.length === 0) return;
     const first = this.s.queue.length + 1;
-    for (let i = 0; i < remaining; i++) this.s.queue.push(this.newTask(sender, now, offer.target));
-    this.reply(sender.id, msg.queuedAt(remaining, first));
+    for (const spec of specs) this.s.queue.push(this.newTask(sender, now, spec));
+    this.reply(sender.id, msg.queuedAt(specs.length, first));
   }
 
   // ---------------------------------------------------------------- game events
@@ -313,8 +369,13 @@ export class Colony {
     if (!bot) return;
     this.s.bots.delete(botId);
     if (bot.task) {
-      this.s.queue.unshift(bot.task);
-      this.reply(bot.task.issuer.id, msg.botLeftRequeued(bot.name, taskTarget(bot.task)));
+      const again = requeueable(bot.task, bot.progress);
+      if (again) {
+        this.s.queue.unshift(again);
+        this.reply(again.issuer.id, msg.botLeftRequeued(bot.name, taskNoun(again)));
+      } else {
+        this.reply(bot.task.issuer.id, msg.botLeftDone(bot.name, taskNoun(withDelivered(bot.task, bot.progress))));
+      }
     }
     this.reply("all", msg.left(bot.name, reason));
     this.drainQueue();
@@ -325,10 +386,17 @@ export class Colony {
     const task = bot?.task;
     if (!bot || !task || task.id !== e.taskId) return; // stale or unknown: ignore
 
+    const progress = bot.progress;
     bot.task = undefined;
-    const text = e.outcome === "done" ? msg.arrived(taskTarget(task)) : msg.failed(taskTarget(task), e.reason);
-    this.botSay(bot, task.issuer.id, text);
+    bot.progress = undefined;
+    this.botSay(bot, task.issuer.id, reportText(task, progress, e));
     this.drainQueue();
+  }
+
+  private onTaskProgress(e: ProgressEvent): void {
+    const bot = this.s.bots.get(e.botId);
+    if (!bot?.task || bot.task.id !== e.taskId) return; // stale or unknown: ignore
+    bot.progress = { ...e.progress };
   }
 
   private onTick(now: Tick): void {
@@ -350,19 +418,21 @@ export class Colony {
       if (b.task) continue;
       const task = this.s.queue.shift() as Task;
       this.assign(b, task);
-      this.botSay(b, task.issuer.id, msg.pickingUp(taskTarget(task)));
+      this.botSay(b, task.issuer.id, msg.pickingUp(taskActivity(task)));
     }
   }
 
-  private assignNew(bot: BotRecord, sender: Sender, now: Tick, target: Vec3): void {
-    this.assign(bot, this.newTask(sender, now, target));
-    this.botSay(bot, sender.id, msg.onMyWay(target));
+  private assignNew(bot: BotRecord, sender: Sender, now: Tick, spec: TaskSpec): void {
+    const task = this.newTask(sender, now, spec);
+    this.assign(bot, task);
+    this.botSay(bot, sender.id, task.kind === "goto" ? msg.onMyWay(task.target) : msg.gathering(task.amount, resourceLabel(task)));
   }
 
   /** The only place that emits `assign`. Enforces: bot must be idle (cancel first). */
   private assign(bot: BotRecord, task: Task): void {
     if (bot.task) throw new Error(`colony invariant: assign to busy bot ${bot.id}`);
     bot.task = task;
+    bot.progress = undefined;
     this.out.push({ kind: "assign", botId: bot.id, task: copyTask(task) });
   }
 
@@ -371,11 +441,26 @@ export class Colony {
     const task = bot.task;
     if (!task) return;
     bot.task = undefined;
+    bot.progress = undefined;
     this.out.push({ kind: "cancel", botId: bot.id, taskId: task.id, reason });
   }
 
-  private newTask(issuer: PlayerRef, now: Tick, target: Vec3): GotoTask {
-    return { id: `t${this.s.nextTaskNum++}`, kind: "goto", target: { ...target }, issuer: ref(issuer), createdAt: now };
+  private newTask(issuer: PlayerRef, now: Tick, spec: TaskSpec): Task {
+    const id = `t${this.s.nextTaskNum++}`;
+    if (spec.kind === "goto") {
+      return { id, kind: "goto", target: { ...spec.target }, issuer: ref(issuer), createdAt: now };
+    }
+    return {
+      id,
+      kind: "gather",
+      item: spec.item,
+      amount: spec.amount,
+      delivered: 0,
+      origin: { ...spec.origin },
+      chest: copyChest(spec.chest),
+      issuer: ref(issuer),
+      createdAt: now,
+    };
   }
 
   private takeLiveOffer(player: PlayerId, now: Tick): Offer | undefined {
@@ -434,7 +519,43 @@ function resolveTarget(c: Extract<Command, { kind: "goto" }>, origin: Vec3): Vec
 }
 
 function statusLine(b: BotRecord): string {
-  return b.task ? msg.statusGoing(b.name, taskTarget(b.task), b.task.issuer.name) : msg.statusIdle(b.name);
+  return b.task ? msg.statusBusy(b.name, taskActivity(b.task, b.progress), b.task.issuer.name) : msg.statusIdle(b.name);
+}
+
+/** `amount` over `n` bots; the first `amount % n` get one more (32/3 -> 11, 11, 10). */
+export function splitAmount(amount: number, n: number): number[] {
+  const base = Math.floor(amount / n);
+  const extra = amount % n;
+  return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
+}
+
+/** The task with `delivered` folded in from its latest progress (gather); goto unchanged. */
+function withDelivered(t: Task, progress: TaskProgress | undefined): Task {
+  if (t.kind !== "gather") return t;
+  return { ...t, delivered: progress?.delivered ?? t.delivered };
+}
+
+/** What goes back on the queue when a running task is preempted / its bot leaves; undefined = already complete. */
+function requeueable(t: Task, progress: TaskProgress | undefined): Task | undefined {
+  const again = withDelivered(t, progress);
+  return again.kind === "gather" && again.delivered >= again.amount ? undefined : again;
+}
+
+function reportText(t: Task, progress: TaskProgress | undefined, e: ReportEvent): string {
+  if (t.kind === "goto") return e.outcome === "done" ? msg.arrived(t.target) : msg.failed(t.target, e.reason);
+  const label = RESOURCES[t.item].label;
+  if (e.outcome === "done") return msg.delivered(Math.max(t.amount, progress?.delivered ?? 0), label);
+  return msg.gatherFailed(label, progress?.delivered ?? t.delivered, t.amount, e.reason);
+}
+
+function chestLine(chest: ChestRef, items: readonly { typeId: string; amount: number }[] | undefined): string {
+  if (items === undefined) return msg.chestUnreadable(chest.pos);
+  if (items.length === 0) return msg.chestEmpty(chest.pos);
+  return msg.chestItems(chest.pos, items);
+}
+
+function copyChest(c: ChestRef): ChestRef {
+  return { dimensionId: c.dimensionId, pos: { ...c.pos } };
 }
 
 function ref(p: PlayerRef): PlayerRef {
@@ -448,12 +569,4 @@ function copyTask(t: Task): Task {
     case "gather":
       return { ...t, origin: { ...t.origin }, chest: { ...t.chest, pos: { ...t.chest.pos } }, issuer: { ...t.issuer } };
   }
-}
-
-/**
- * TODO(phase-2, Job 2): placeholder so Phase 1 compiles with the widened Task union. Replace every use with
- * per-kind task descriptions (PHASE2-SPEC §Colony: describeTask), then delete this.
- */
-function taskTarget(t: Task): Vec3 {
-  return t.kind === "goto" ? t.target : t.origin;
 }

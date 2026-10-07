@@ -1,5 +1,16 @@
 // Internal mutable state of the colony core. Not exported outside src/core/colony.
-import type { BotId, PlayerId, PlayerRef, Task, TaskId, Tick, Vec3 } from "../types.js";
+import type {
+  BotId,
+  ChestRef,
+  PlayerId,
+  PlayerRef,
+  ResourceKey,
+  Task,
+  TaskId,
+  TaskProgress,
+  Tick,
+  Vec3,
+} from "../types.js";
 
 export interface BotRecord {
   id: BotId;
@@ -7,6 +18,8 @@ export interface BotRecord {
   /** Registration order; used for deterministic iteration and tie-breaks. */
   seq: number;
   task?: Task;
+  /** Latest progress of `task` (only when the report's taskId matched). Cleared whenever `task` changes. */
+  progress?: TaskProgress;
 }
 
 export interface PendingSpawn {
@@ -14,12 +27,17 @@ export interface PendingSpawn {
   requestedBy: PlayerId;
 }
 
-export interface GotoOffer {
-  kind: "goto";
+/** What to create for one bot once an offer is accepted (ids/issuer/createdAt are added then). */
+export type TaskSpec =
+  | { kind: "goto"; target: Vec3 }
+  | { kind: "gather"; item: ResourceKey; amount: number; origin: Vec3; chest: ChestRef };
+
+/** A pending multi-bot request (goto/come/gather): one spec per bot, assigned in order. */
+export interface TaskOffer {
+  kind: "task";
   owner: PlayerRef;
   createdAt: Tick;
-  target: Vec3;
-  count: number;
+  specs: TaskSpec[];
 }
 
 export interface StopOffer {
@@ -32,7 +50,7 @@ export interface StopOffer {
   taskId: TaskId;
 }
 
-export type Offer = GotoOffer | StopOffer;
+export type Offer = TaskOffer | StopOffer;
 
 export interface ColonyState {
   /** Map preserves insertion (= registration) order. */
@@ -46,6 +64,8 @@ export interface ColonyState {
   /** Tick of each player's last cooldown-checked accepted command. */
   lastCommandAt: Map<PlayerId, Tick>;
   nextTaskNum: number;
+  /** The registered colony chest (Phase 2; in memory only until Phase 8). */
+  chest?: ChestRef;
 }
 
 export function createState(): ColonyState {

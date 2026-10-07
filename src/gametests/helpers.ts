@@ -1,14 +1,15 @@
 // Helpers for colony GameTests. Tests drive the REAL runtime only through the spec interface
-// (ColonyRuntime.submitText / adoptBot / botIds / snapshot).
+// (ColonyRuntime.submitText / adoptBot / botIds / snapshot / recentReplies).
 //
-// Observability: replies to the fake sender ids are dropped, so outcomes are read from
-// ColonyRuntime.snapshot() (bot state, active task, queue) plus the bot's position in the world.
+// Observability: replies to the fake sender ids match no online player; the runtime keeps them in a bounded
+// buffer read with recentReplies(sender.id) (Phase 2). Outcomes are also read from ColonyRuntime.snapshot()
+// (bot state, active task, queue, chest), the bot's position, and chest contents via the block's inventory.
 //   - "done reported"        <=> the bot is near the target AND the colony shows it idle.
 //   - "failed (unreachable)" <=> the colony shows it idle while it is NOT near the target, before the
 //     timeout deadline (200 + 20 x distance ticks, per spec), so the reason cannot have been "timeout".
-import { GameMode, system } from "@minecraft/server";
+import { GameMode, ItemStack, system } from "@minecraft/server";
 import { spawnSimulatedPlayer } from "@minecraft/server-gametest";
-import type { Vector3 } from "@minecraft/server";
+import type { Container, Vector3 } from "@minecraft/server";
 import type { SimulatedPlayer, Test } from "@minecraft/server-gametest";
 import type { BotId, BotView, Sender, Task, Vec3 } from "../core/types.js";
 import { getRuntime, startColonyRuntime } from "../game/runtime.js";
@@ -24,7 +25,7 @@ export function runtime(): ColonyRuntime {
 
 let senderSeq = 0;
 
-/** A fake command sender. Its id matches no player, so the colony's replies to it are dropped. */
+/** A fake command sender. Its id matches no player; the colony's replies to it are kept for recentReplies(). */
 export function makeSender(label: string, pos: Vector3): Sender {
   senderSeq++;
   return { id: `gametest:${label}:${system.currentTick}:${senderSeq}`, name: `GT-${label}`, pos: { x: pos.x, y: pos.y, z: pos.z } };
@@ -104,14 +105,20 @@ export function sameVec(a: Vec3, b: Vec3, eps = 0.01): boolean {
 
 export function taskStr(t: Task | undefined): string {
   if (!t) return "none";
-  const what = t.kind === "goto" ? fmt(t.target) : `gather ${t.item} x${t.amount}`; // TODO(phase-2, Job 6)
+  const what = t.kind === "goto" ? fmt(t.target) : `gather ${t.item} ${t.delivered}/${t.amount}`;
   return `${t.id}->${what} for ${t.issuer.name}`;
 }
 
 export function snapStr(): string {
   const s = runtime().snapshot();
-  const bots = s.bots.map((b) => `${b.name}:${b.state}(${taskStr(b.task)})`).join(", ");
-  return `bots [${bots}] queued [${s.queued.map((t) => t.id).join(", ")}] offers ${s.pendingOffers}`;
+  const bots = s.bots
+    .map((b) => {
+      const p = b.progress ? ` delivered ${b.progress.delivered} held ${b.progress.held}` : "";
+      return `${b.name}:${b.state}(${taskStr(b.task)}${p})`;
+    })
+    .join(", ");
+  const chest = s.chest ? ` chest ${fmt(s.chest.pos)}` : "";
+  return `bots [${bots}] queued [${s.queued.map((t) => t.id).join(", ")}] offers ${s.pendingOffers}${chest}`;
 }
 
 /** Every fake sender used so far; flushed (!stop) before each test so stale queued tasks can't leak. */
@@ -217,4 +224,102 @@ export function removeBots(test: Test, bots: SimulatedPlayer[]): void {
       /* already gone / test completed */
     }
   }
+}
+
+// ---------------------------------------------------------------- Phase 2: chests, replies, scene checks
+
+export const CHEST = "minecraft:chest";
+export const CRAFTING_TABLE = "minecraft:crafting_table";
+
+/** Scene setup only (never gameplay): put a chest at a relative cell. Returns its ABSOLUTE block position. */
+export function placeChest(test: Test, rel: Vector3): Vector3 {
+  test.setBlockType(CHEST, rel);
+  return test.worldBlockLocation(rel);
+}
+
+/** The chest's container at a relative cell, or undefined (not a container / unloaded). */
+export function chestContainer(test: Test, rel: Vector3): Container | undefined {
+  try {
+    return test.getBlock(rel).getComponent("inventory")?.container;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Scene setup only: put `amount` of `typeId` into the first empty slot of the chest. false on failure. */
+export function fillChest(test: Test, rel: Vector3, typeId: string, amount: number): boolean {
+  const c = chestContainer(test, rel);
+  if (!c) return false;
+  try {
+    for (let i = 0; i < c.size; i++) {
+      if (c.getItem(i) === undefined) {
+        c.setItem(i, new ItemStack(typeId, amount));
+        return true;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return false;
+}
+
+/** Contents of a chest as typeId -> count. undefined if unreadable. */
+export function chestContents(test: Test, rel: Vector3): Map<string, number> | undefined {
+  const c = chestContainer(test, rel);
+  if (!c) return undefined;
+  const out = new Map<string, number>();
+  try {
+    for (let i = 0; i < c.size; i++) {
+      const it = c.getItem(i);
+      if (it) out.set(it.typeId, (out.get(it.typeId) ?? 0) + it.amount);
+    }
+  } catch {
+    return undefined;
+  }
+  return out;
+}
+
+export function chestCount(test: Test, rel: Vector3, typeId: string): number {
+  return chestContents(test, rel)?.get(typeId) ?? 0;
+}
+
+export function chestStr(test: Test, rel: Vector3): string {
+  const m = chestContents(test, rel);
+  if (!m) return "chest unreadable";
+  if (m.size === 0) return "chest empty";
+  return `chest: ${[...m].map(([id, n]) => `${n} ${id.replace("minecraft:", "")}`).join(", ")}`;
+}
+
+/** Replies the colony addressed to a GameTest sender (rendered lines, oldest first). */
+export function replies(s: Sender): string[] {
+  return runtime().recentReplies(s.id);
+}
+
+export function hasReply(s: Sender, fragment: string): boolean {
+  return replies(s).some((l) => l.includes(fragment));
+}
+
+export function repliesStr(s: Sender, last = 6): string {
+  const r = replies(s);
+  return r.length === 0 ? "no replies" : `replies: ${r.slice(-last).map((l) => JSON.stringify(l)).join(" | ")}`;
+}
+
+/** Wait until every bot is idle. Returns ticks waited or -1. */
+export function waitAllIdle(test: Test, ids: BotId[], maxTicks: number): Promise<number> {
+  return waitFor(test, () => ids.every((id) => isIdle(id)), maxTicks);
+}
+
+/** Relative positions of every block of `typeId` in the test area (x/z 0..size-1, y lo..hi). */
+export function findInArea(test: Test, typeId: string, size: { x: number; z: number }, yLo: number, yHi: number): Vector3[] {
+  const out: Vector3[] = [];
+  for (let x = 0; x < size.x; x++)
+    for (let y = yLo; y <= yHi; y++)
+      for (let z = 0; z < size.z; z++) {
+        try {
+          if (test.getBlock({ x, y, z }).typeId === typeId) out.push({ x, y, z });
+        } catch {
+          /* out of bounds / unloaded */
+        }
+      }
+  return out;
 }

@@ -1,5 +1,6 @@
 // Pure command parser. Grammar lives in specs.ts; this file only interprets it.
-import type { Command, Coord, ParseResult } from "../types.js";
+import type { Command, Coord, ParseResult, ResourceKey } from "../types.js";
+import { GATHER_LIMITS, RESOURCE_NAMES_HINT, resolveResource } from "../items.js";
 import { BOT_NAME_RE, MAX_COUNT, MIN_COUNT, findSpec, type ArgSpec, type CommandSpec } from "./specs.js";
 
 const NUMBER_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
@@ -36,7 +37,12 @@ interface Values {
   count?: number;
   name?: string;
   topic?: string;
+  item?: ResourceKey;
+  amount?: number;
+  chestAction?: ChestAction;
 }
+
+export type ChestAction = Extract<Command, { kind: "chest" }>["action"];
 
 type ArgResult = { ok: true } | { ok: false; error: string };
 
@@ -62,14 +68,14 @@ export function parseCommand(text: string, prefix = "!"): ParseResult | null {
       if (arg.optional) break; // optional args are always trailing
       return fail(`Missing ${arg.label}.`);
     }
-    const r = parseArg(arg, token, values);
+    const r = parseArg(arg, token, values, prefix);
     if (!r.ok) return fail(r.error);
   }
 
   return { ok: true, command: build(spec, values) };
 }
 
-function parseArg(arg: ArgSpec, token: string, values: Values): ArgResult {
+function parseArg(arg: ArgSpec, token: string, values: Values, prefix: string): ArgResult {
   switch (arg.type) {
     case "coord": {
       const c = parseCoord(token, AXES[values.coords.length]);
@@ -96,6 +102,28 @@ function parseArg(arg: ArgSpec, token: string, values: Values): ArgResult {
     case "topic":
       values.topic = token;
       return { ok: true };
+    case "item": {
+      const item = resolveResource(token);
+      if (item === undefined) return { ok: false, error: `Unknown item '${echo(token)}'. Try: ${RESOURCE_NAMES_HINT}.` };
+      values.item = item;
+      return { ok: true };
+    }
+    case "amount": {
+      const { minAmount, maxAmount } = GATHER_LIMITS;
+      const n = COUNT_RE.test(token) ? Number(token) : NaN;
+      if (!Number.isSafeInteger(n) || n < minAmount || n > maxAmount) {
+        return { ok: false, error: `Amount must be a whole number from ${minAmount} to ${maxAmount}.` };
+      }
+      values.amount = n;
+      return { ok: true };
+    }
+    case "chestAction": {
+      if (token.toLowerCase() !== "set") {
+        return { ok: false, error: `Unknown chest action '${echo(token)}'. Use ${prefix}chest or ${prefix}chest set.` };
+      }
+      values.chestAction = "set";
+      return { ok: true };
+    }
   }
 }
 
@@ -146,8 +174,10 @@ function build(spec: CommandSpec, v: Values): Command {
     case "queue":
       return { kind: "queue" };
     case "gather":
+      // Spec guarantees the required item was parsed.
+      return { kind: "gather", item: v.item as ResourceKey, amount: v.amount ?? GATHER_LIMITS.defaultAmount, count };
     case "chest":
-      throw new Error(`TODO(phase-2, Job 1): build ${spec.name}`);
+      return { kind: "chest", action: v.chestAction ?? "show" };
   }
 }
 

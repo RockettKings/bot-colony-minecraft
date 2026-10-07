@@ -29,12 +29,6 @@ Also confirmed: slash fallback (including quoted form), short hops, death → re
 ## What's next (revised 2026-10-06)
 Decision: **no Claude API and no dedicated server.** Everything runs as code inside the behavior pack on a normal solo or client-hosted world. Claude's role is design-time (writing and testing the code), not a runtime commander. The `?` / BDS bridge is dropped.
 
-Revised roadmap:
-- Phase 2: Persistence. Save the roster (names, last positions, queued tasks) in world dynamic properties; respawn and resume on load.
-- Phase 3: Gatherers. Chop, mine, collect drops, deposit into a chest.
-- Phase 4: Builders. Blueprint → structure; missing materials raise gather requests.
-- Phase 5: In-game commander. Goal commands (e.g. `!gather oak_log 64`, `!build hut`) decomposed by rules into multi-bot task graphs.
-- Phase 6: Guards (`!defend` patrols, rule-based combat).
-- Phase 7: Scale and outposts.
-- Phase 8: Learned combat, trained offline on a PC and shipped as plain JS weights inside the pack.
+Revised roadmap (persistence moved last at the player's request; phases 2–8 rapid-prototyped back to back, then refined through play testing):
+- Phase 2: Gatherers. Phase 3: Builders. Phase 4: Commander (rule-based goals). Phase 5: Guards. Phase 6: Scale and outposts. Phase 7: Learned combat (trained offline, shipped as JS weights). Phase 8: Persistence.
 - PLAYTEST §D (multiplayer) when a second player is available.

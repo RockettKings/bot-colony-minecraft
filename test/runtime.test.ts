@@ -81,8 +81,26 @@ function makeSim(name: string, at: Vec3): FakeSim {
 
 vi.mock("@minecraft/server", () => {
   class Player {}
+  // Phase 2 adapter value imports (src/game/adapter/{index,world}.ts). Unused by these goto tests, but the
+  // mock must provide every value export the adapter references.
+  class ItemStack {
+    constructor(
+      readonly typeId: string,
+      public amount = 1,
+    ) {}
+  }
+  class BlockVolume {
+    constructor(
+      readonly from: Vec3,
+      readonly to: Vec3,
+    ) {}
+  }
   return {
     Player,
+    ItemStack,
+    BlockVolume,
+    BlockTypes: { get: (id: string) => ({ id }) },
+    Direction: { Up: "Up", Down: "Down", North: "North", South: "South", East: "East", West: "West" },
     GameMode: { Survival: "Survival" },
     CommandPermissionLevel: { Any: 0 },
     CustomCommandParamType: { String: 0 },
@@ -119,6 +137,7 @@ vi.mock("@minecraft/server", () => {
 });
 
 vi.mock("@minecraft/server-gametest", () => ({
+  LookDuration: { Instant: "Instant", Continuous: "Continuous", UntilMove: "UntilMove" },
   spawnSimulatedPlayer: (loc: Vec3, name: string) => {
     if (g.spawnThrows) throw new Error(g.spawnThrows);
     const sim = makeSim(name, { x: loc.x, y: loc.y, z: loc.z });

@@ -13,14 +13,14 @@ npm run pack         # build, then zip packs/BP -> dist/bot-colony.mcpack (pure 
 | Script | Does |
 |---|---|
 | `npm run typecheck` | `tsc --noEmit` for the pack (`tsconfig.json`) and the tests (`tsconfig.test.json`) |
-| `npm test` | Vitest unit tests (core, executor logic, runtime, module boundaries) |
-| `npm run build` | Regenerates the GameTest structures in `packs/BP/structures/colony/` (`scripts/make-structure.mjs`), then bundles `src/main.ts` into `packs/BP/scripts/main.js` |
+| `npm test` | Vitest unit tests (parser, colony, gather/crafting logic, executors against fakes, adapter against a mocked engine, runtime, module boundaries) |
+| `npm run build` | Regenerates the GameTest structures in `packs/BP/structures/colony/` (`flat`, `walled`, `grove`, `quarry`; `scripts/make-structure.mjs`), then bundles `src/main.ts` into `packs/BP/scripts/main.js` |
 | `npm run pack` | `build`, then zips `packs/BP` into `dist/bot-colony.mcpack` |
 | `npm run check` | `typecheck`, then `test`, then `build` |
 
 ## 2. Install
 
-**Import (simplest):** double-click `dist/bot-colony.mcpack` (or open it with Minecraft). The game starts and reports that it imported **Bot Colony BP**. The pack lands in `behavior_packs`. Re-importing the same `header.version` is refused as a duplicate: delete the old copy first, or bump `version` in `packs/BP/manifest.json`.
+**Import (simplest):** double-click `dist/bot-colony.mcpack` (or open it with Minecraft). The game starts and reports that it imported **Bot Colony BP**. The pack lands in `behavior_packs`. Re-importing the same `header.version` is refused as a duplicate: delete the old copy first, or bump `version` in `packs/BP/manifest.json`. **Upgrading from 0.1.0 (Phase 1) to 0.2.0:** delete the old Bot Colony BP in Settings → Storage before importing, then check the world's active pack (its description reads "Phase 2 gatherers").
 
 **Manual / dev loop (Windows):** copy or symlink `packs/BP` to `development_behavior_packs\bot-colony` in the game's `com.mojang` folder. Packs in `development_behavior_packs` are re-read from disk on every world load, so a rebuild needs no re-import (just reopen the world). Packs in `behavior_packs` are meant for finished versions and can be cached. The `com.mojang` folder is at:
 
@@ -32,9 +32,9 @@ If you're unsure which build you have, check which folder exists. `/reload` relo
 ## 3. Play world (cheats OFF)
 
 1. **Create New World**. Under **Experiments**, turn on **Beta APIs**.
-2. Leave **Cheats OFF** (Game settings). This is the Phase 1 target.
+2. Leave **Cheats OFF** (Game settings). This is the target for every phase.
 3. Under **Behavior Packs → Available**, select **Bot Colony BP** and **Activate**.
-4. **Create**.
+4. **Create**. For gathering use **default terrain** (not flat): bots need trees, exposed stone, sand and gravel within about 16 blocks of the requester. A chest you place yourself becomes the colony chest.
 
 Turning on Beta APIs (or any experiment) **permanently disables achievements for that world**. Use a throwaway world.
 
@@ -54,9 +54,11 @@ Type these in chat. `!` commands are hidden from public chat. Replies come from 
 | `!come` / `!come 2` | The bot says "On my way to x y z.", walks to you, then says "Arrived at x y z." |
 | `!goto ~5 ~ ~` | The bot goes 5 blocks east (+x) of you. `!goto 10 64 10 2` sends 2 bots |
 | `!status` / `!status Bot-1` | One line per bot ("Bot-1: idle" or "Bot-1: going to x y z for <you>"), then "Queued: n". With a name, just that bot |
+| `!chest set` | Look at a chest (or stand next to it): "Colony chest set to x y z." `!chest` then shows "Colony chest at x y z: empty." or its contents |
+| `!gather logs 8` | The bot says "Gathering 8 logs.", chops reachable logs nearby, deposits them, then "Delivered 8 logs to the chest." `!status` shows "Bot-1: gathering logs n/8 for <you>". Items: logs / `<species>_log`, cobblestone (`stone`, `cobble`), dirt (`grass`), sand, gravel. `!gather oak_log 32 2` splits the amount over 2 bots |
 | `!stop` / `!stop Bot-1` | Stops all your tasks and drops your queued ones ("Stopped 1 task, dropped 0 queued."), or stops one bot ("Stopped Bot-1.") |
 
-Defaults: up to 3 bots; count 1–16 per command; a bot name is 1–16 letters, digits, `_` or `-`, and `@Bot-1` also works. A command less than 1 s after your previous one gets "Slow down…" (`!help`, `!override` and `!queue` are exempt). A failed task says why: "Couldn't reach x y z: no path." (also `timed out` or `I died`). Failed tasks aren't retried.
+Defaults: up to 3 bots; count 1–16 per command; a bot name is 1–16 letters, digits, `_` or `-`, and `@Bot-1` also works. A command less than 1 s after your previous one gets "Slow down…" (`!help`, `!override` and `!queue` are exempt). A failed task says why: "Couldn't reach x y z: no path." (also `timed out` or `I died`). Failed tasks aren't retried. Gather failures read "Stopped gathering <item> at n/amount: <reason>." (`nothing left to gather nearby`, `can't reach the colony chest`, `no pickaxe and couldn't make one`, `the chest is full`, or a Phase 1 reason). Bots and the colony chest setting are in memory only: after reopening a world, `!spawn` and `!chest set` again (persistence is Phase 8).
 
 **Collision demo (needs a friend on the world):**
 1. Make every bot busy with your tasks (`!goto` somewhere far away).
@@ -80,8 +82,9 @@ Run `/colony:probe <spawn|chat|chunks|reload>` on the play world (cheats off). A
    - All tests: `/gametest runset colony`
    - One test: `/gametest run colony:goto_flat` (also `colony:goto_unreachable`, `colony:override_flow`)
    - Variants whose bot is spawned with the top-level API (absolute coords, the same path as in play): `colony:goto_flat_abs`, `colony:goto_unreachable_abs`, `colony:override_flow_abs`
+   - Phase 2 (top-level spawns only, because the `breakBlock` / `lookAtBlock` coordinate frame for test-spawned bots is unverified): `colony:chest_set`, `colony:gather_logs`, `colony:gather_two_bots`, `colony:gather_cobble_craft`, `colony:gather_no_source`. They use the `colony:grove` (three 4-high oak columns) and `colony:quarry` (stone pad) structures and place their chest in-test. Gather tests are long (up to ~3000 ticks); leave the world running
    - Clean up the test areas: `/gametest clearall 64` (radius in blocks)
-4. Results show as in-world markers and in chat. Failure messages print the bot's position in both absolute and test-relative coords.
+4. Results show as in-world markers and in chat. Failure messages print the bot's position in both absolute and test-relative coords. GameTests use `test.setBlockType` / chest `setItem` only to build the scene; bots never get items that way.
 
 How to read the results: if `*_abs` passes but the plain variant fails with the bot walking off, bots spawned with `test.spawnSimulatedPlayer` read navigation coords as test-relative. The runtime is fine; only the test-spawn path differs. Record it in [SPIKE-CHECKLIST.md](SPIKE-CHECKLIST.md) §5.
 

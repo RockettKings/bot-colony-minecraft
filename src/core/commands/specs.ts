@@ -1,5 +1,6 @@
 // Command table: the single source of truth for both parsing and help text.
 import type { CommandKind } from "../types.js";
+import { GATHER_LIMITS } from "../items.js";
 
 export const MIN_COUNT = 1;
 export const MAX_COUNT = 16;
@@ -10,7 +11,10 @@ export type ArgType =
   | "coord" // number, `~` or `~n`
   | "count" // integer MIN_COUNT..MAX_COUNT
   | "botName" // optional leading `@`, then BOT_NAME_RE
-  | "topic"; // any single token
+  | "topic" // any single token
+  | "item" // resolveResource(token) from src/core/items.ts
+  | "amount" // integer GATHER_LIMITS.minAmount..maxAmount
+  | "chestAction"; // literal `set` (case-insensitive)
 
 export interface ArgSpec {
   /** Placeholder shown in usage, e.g. `x` -> `<x>` / `[x]`. */
@@ -48,6 +52,12 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     opt("count", "count", "count"),
   ]),
   spec("come", `Call bots to your position. Count ${MIN_COUNT}-${MAX_COUNT}, default ${MIN_COUNT}.`, [opt("count", "count", "count")]),
+  spec(
+    "gather",
+    `Gather an item into the colony chest. Amount ${GATHER_LIMITS.minAmount}-${GATHER_LIMITS.maxAmount} (default ${GATHER_LIMITS.defaultAmount}), split across ${MIN_COUNT}-${MAX_COUNT} bots.`,
+    [req("item", "item", "item"), opt("amount", "amount", "amount"), opt("bots", "bot count", "count")],
+  ),
+  spec("chest", "Show the colony chest, or 'set' it to the chest you look at.", [opt("set", "chest action", "chestAction")]),
   spec("stop", "Stop all your tasks (queued too), or one bot. Stopping another player's bot asks first.", [opt("bot", "bot name", "botName")]),
   spec("override", "Answer a busy reply: take (or stop) the busy bots anyway.", []),
   spec("queue", "Answer a busy reply: wait in line for free bots.", []),

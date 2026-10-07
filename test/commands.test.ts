@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { COMMAND_SPECS, COORD_LIMITS, helpText, isCommand, parseCommand, parseCoord } from "../src/core/commands/index.js";
-import { createColony, handleChat } from "../src/core/index.js";
+import { RESOURCE_NAMES_HINT, createColony, handleChat } from "../src/core/index.js";
 import type { Command, ParseResult, Sender } from "../src/core/types.js";
 
 const ok = (text: string, prefix?: string): Command => {
@@ -198,6 +198,8 @@ describe("helpText", () => {
       "!spawn [name]",
       "!goto <x> <y> <z> [count]",
       "!come [count]",
+      "!gather <item> [amount] [bots]",
+      "!chest [set]",
       "!stop [bot]",
       "!override",
       "!queue",
@@ -231,7 +233,7 @@ describe("COMMAND_SPECS drives parsing", () => {
   it("covers every command kind exactly once", () => {
     const names = COMMAND_SPECS.map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
-    expect([...names].sort()).toEqual(["come", "goto", "help", "override", "queue", "spawn", "status", "stop"]);
+    expect([...names].sort()).toEqual(["chest", "come", "gather", "goto", "help", "override", "queue", "spawn", "status", "stop"]);
   });
   it("every spec parses with no args when it has no required args, and its kind matches", () => {
     for (const s of COMMAND_SPECS) {
@@ -248,7 +250,8 @@ describe("COMMAND_SPECS drives parsing", () => {
   });
   it("too many args always yields that spec's usage", () => {
     for (const s of COMMAND_SPECS) {
-      const filler = s.args.map((a) => (a.type === "coord" ? "1" : a.type === "count" ? "1" : "x"));
+      const fillers: Record<string, string> = { coord: "1", count: "1", amount: "1", item: "logs", chestAction: "set" };
+      const filler = s.args.map((a) => fillers[a.type] ?? "x");
       expect(err(`!${s.name} ${[...filler, "extra"].join(" ")}`).usage).toBe(`!${s.usage}`);
     }
   });
@@ -453,7 +456,7 @@ describe("handleChat glue", () => {
   });
 
   it("forwards each non-help kind", () => {
-    for (const t of ["!status", "!spawn Bob", "!come", "!stop @Bot-1", "!override", "!queue"]) {
+    for (const t of ["!status", "!spawn Bob", "!come", "!stop @Bot-1", "!override", "!queue", "!gather logs 4 2", "!chest", "!chest set"]) {
       const colony = createColony();
       const spy = vi.spyOn(colony, "handle");
       expect(handleChat(colony, t, alice, 7).handled).toBe(true);
@@ -476,5 +479,139 @@ describe("help topic echo", () => {
   it("clips long topics and strips section signs", () => {
     const [line] = helpText("\u00a7c" + "z".repeat(5000));
     expect(line).toBe(`Unknown command '!c${"z".repeat(18)}\u2026'. Type !help.`);
+  });
+});
+
+// ---------- Phase 2: gather / chest ----------
+
+describe("gather", () => {
+  const USAGE = "!gather <item> [amount] [bots]";
+  it("defaults amount to 16 and bots to 1", () => {
+    expect(ok("!gather oak_log")).toEqual({ kind: "gather", item: "oak_log", amount: 16, count: 1 });
+  });
+  it("parses amount and bots, including bounds", () => {
+    expect(ok("!gather oak_log 32 2")).toEqual({ kind: "gather", item: "oak_log", amount: 32, count: 2 });
+    expect(ok("!gather sand 1")).toEqual({ kind: "gather", item: "sand", amount: 1, count: 1 });
+    expect(ok("!gather sand 256 16")).toEqual({ kind: "gather", item: "sand", amount: 256, count: 16 });
+    expect(ok("!gather sand 007 01")).toEqual({ kind: "gather", item: "sand", amount: 7, count: 1 });
+  });
+  it.each([
+    ["logs", "log"],
+    ["wood", "log"],
+    ["log", "log"],
+    ["stone", "cobblestone"],
+    ["cobble", "cobblestone"],
+    ["cobblestone", "cobblestone"],
+    ["grass", "dirt"],
+    ["dirt", "dirt"],
+    ["gravel", "gravel"],
+    ["birch_log", "birch_log"],
+  ])("resolves item %j to %j", (token, item) => {
+    expect(ok(`!gather ${token}`)).toMatchObject({ kind: "gather", item });
+  });
+  it("item is case-insensitive and accepts a minecraft: prefix", () => {
+    expect(ok("!GATHER OAK_LOG")).toMatchObject({ item: "oak_log" });
+    expect(ok("!gather minecraft:oak_log 4")).toMatchObject({ item: "oak_log", amount: 4 });
+    expect(ok("!gather Minecraft:Cobble")).toMatchObject({ item: "cobblestone" });
+    expect(ok("!gather Wood")).toMatchObject({ item: "log" });
+  });
+  it("missing item", () => {
+    expect(err("!gather")).toEqual({ ok: false, error: "Missing item.", usage: USAGE });
+  });
+  it.each(["diamond", "iron_ore", "minecraft:", "oak_log_", "logs!", "1"])("unknown item %j", (t) => {
+    expect(err(`!gather ${t}`)).toEqual({
+      ok: false,
+      error: `Unknown item '${t}'. Try: ${RESOURCE_NAMES_HINT}.`,
+      usage: USAGE,
+    });
+  });
+  it("unknown item echo is sanitised", () => {
+    const e = err(`!gather §c${"q".repeat(100)}`).error;
+    expect(e).not.toContain("§");
+    expect(e).toContain(`'c${"q".repeat(18)}…'`);
+  });
+  it.each(["0", "257", "-1", "1.5", "+2", "1e2", "ten", "１", "99999999999999999999"])("rejects amount %j", (a) => {
+    expect(err(`!gather logs ${a}`)).toEqual({
+      ok: false,
+      error: "Amount must be a whole number from 1 to 256.",
+      usage: USAGE,
+    });
+  });
+  it.each(["0", "17", "two", "1.0"])("rejects bots %j with the count error", (b) => {
+    expect(err(`!gather logs 8 ${b}`)).toEqual({
+      ok: false,
+      error: "Count must be a whole number from 1 to 16.",
+      usage: USAGE,
+    });
+  });
+  it("reports the first bad argument", () => {
+    expect(err("!gather nope 0 99").error).toContain("Unknown item");
+    expect(err("!gather logs 0 99").error).toContain("Amount");
+  });
+  it("too many args", () => {
+    expect(err("!gather logs 8 2 x")).toEqual({ ok: false, error: "Too many arguments.", usage: USAGE });
+  });
+  it("uses the given prefix in usage", () => {
+    expect(err(".gather", ".").usage).toBe(".gather <item> [amount] [bots]");
+  });
+});
+
+describe("chest", () => {
+  it("no arg shows, `set` sets (case-insensitive)", () => {
+    expect(ok("!chest")).toEqual({ kind: "chest", action: "show" });
+    expect(ok("!chest set")).toEqual({ kind: "chest", action: "set" });
+    expect(ok("!CHEST SeT")).toEqual({ kind: "chest", action: "set" });
+  });
+  it.each(["show", "sett", "1", "@set", "set!"])("rejects action %j", (a) => {
+    expect(err(`!chest ${a}`)).toEqual({
+      ok: false,
+      error: `Unknown chest action '${a}'. Use !chest or !chest set.`,
+      usage: "!chest [set]",
+    });
+  });
+  it("action error uses the configured prefix", () => {
+    expect(err(".chest x", ".")).toEqual({
+      ok: false,
+      error: "Unknown chest action 'x'. Use .chest or .chest set.",
+      usage: ".chest [set]",
+    });
+  });
+  it("too many args", () => {
+    expect(err("!chest set now")).toEqual({ ok: false, error: "Too many arguments.", usage: "!chest [set]" });
+  });
+});
+
+describe("Phase 2 specs", () => {
+  it("are ordered help, status, spawn, goto, come, gather, chest, stop, override, queue", () => {
+    expect(COMMAND_SPECS.map((s) => s.name)).toEqual([
+      "help", "status", "spawn", "goto", "come", "gather", "chest", "stop", "override", "queue",
+    ]);
+  });
+  it("have the exact descriptions", () => {
+    const d = (n: string) => COMMAND_SPECS.find((s) => s.name === n)!.description;
+    expect(d("gather")).toBe("Gather an item into the colony chest. Amount 1-256 (default 16), split across 1-16 bots.");
+    expect(d("chest")).toBe("Show the colony chest, or 'set' it to the chest you look at.");
+  });
+  it("every command fits in the 5 tokens of /colony:c (command name + args)", () => {
+    for (const s of COMMAND_SPECS) expect(1 + s.args.length).toBeLessThanOrEqual(5);
+  });
+  it("a /colony:c line re-joined from its 5 String params parses like chat", () => {
+    // Mirrors src/game/frontends/slash.ts: non-empty params joined by one space, prefix prepended.
+    const params = ["gather", "minecraft:oak_log", "32", "2", ""];
+    const text = "!" + params.filter((p) => p.trim().length > 0).join(" ");
+    expect(ok(text)).toEqual({ kind: "gather", item: "oak_log", amount: 32, count: 2 });
+    expect(ok("!" + ["chest", "set"].join(" "))).toEqual({ kind: "chest", action: "set" });
+  });
+});
+
+describe("handleChat glue: Phase 2 parse errors", () => {
+  it("gather errors reply with error + usage and never reach the colony", () => {
+    const colony = createColony();
+    const spy = vi.spyOn(colony, "handle");
+    expect(handleChat(colony, "!gather logs 999", alice, 1).effects).toEqual([
+      { kind: "reply", to: "p1", text: "Amount must be a whole number from 1 to 256." },
+      { kind: "reply", to: "p1", text: "Usage: !gather <item> [amount] [bots]" },
+    ]);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

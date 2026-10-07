@@ -8,12 +8,15 @@ import {
   type ColonyEvent,
   type ColonySnapshot,
   type Effect,
+  type ChestRef,
+  type PlayerId,
   type Sender,
+  type TaskProgress,
   type Tick,
   type Vec3,
 } from "../core/index.js";
 import { spawnBot, wrapSimulatedPlayer, type SimulatedPlayer, type WorkerBody } from "./adapter/index.js";
-import { createWorldPort } from "./adapter/world.js";
+import { createWorldPort, locateChest, readChest } from "./adapter/world.js";
 import {
   DEFAULT_GATHER_CONFIG,
   createExecutor,
@@ -35,7 +38,15 @@ export interface ColonyRuntime {
   botIds(): BotId[];
   /** Read model of the colony core: bots (state + active task), queue, offer count. A copy. */
   snapshot(): ColonySnapshot;
+  /**
+   * For GameTests: rendered replies (with `<Bot>` / `§7[Colony]§r` prefix) addressed to `to` while no online
+   * player had that id, oldest first. Bounded: last REPLY_BUFFER_PER_ID per id, REPLY_BUFFER_IDS ids. A copy.
+   */
+  recentReplies(to: PlayerId): string[];
 }
+
+export const REPLY_BUFFER_PER_ID = 50;
+export const REPLY_BUFFER_IDS = 64;
 
 const PUMP_INTERVAL_TICKS = 4;
 const RESPAWN_DELAY_TICKS = 20;
@@ -46,6 +57,8 @@ interface BotEntry {
   body: WorkerBody;
   name: string;
   executor?: TaskExecutor;
+  /** Last progress emitted for `executor` (taskProgress is sent only on change). Reset whenever executor changes. */
+  lastProgress?: TaskProgress;
   /** Set while dead; respawn is attempted from the pump at/after this tick. */
   respawnAt?: Tick;
   respawnAttempts: number;
@@ -57,6 +70,8 @@ class Runtime implements ColonyRuntime {
   /** Events raised while executing effects; handled after the current effect list, in order. */
   private readonly pending: ColonyEvent[] = [];
   private draining = false;
+  /** Replies to ids with no online player (GameTest senders, offline players). Map order = least recently used first. */
+  private readonly offlineReplies = new Map<PlayerId, string[]>();
 
   start(): void {
     const prefix = this.colony.config.prefix;
@@ -124,6 +139,10 @@ class Runtime implements ColonyRuntime {
     return this.colony.snapshot();
   }
 
+  recentReplies(to: PlayerId): string[] {
+    return [...(this.offlineReplies.get(to) ?? [])];
+  }
+
   // ------------------------------------------------------------ event plumbing
 
   private emit(e: ColonyEvent): void {
@@ -176,6 +195,8 @@ class Runtime implements ColonyRuntime {
           logWarn(`${bot.name}: assign while busy with ${bot.executor.taskId}; replacing`);
           bot.executor.cancel();
         }
+        bot.executor = undefined;
+        bot.lastProgress = undefined;
         bot.executor = createExecutor(EXECUTORS, fx.task, contextFor(bot.body));
         return;
       }
@@ -184,16 +205,16 @@ class Runtime implements ColonyRuntime {
         if (bot?.executor && bot.executor.taskId === fx.taskId) {
           bot.executor.cancel();
           bot.executor = undefined; // no taskReport for cancelled tasks
+          bot.lastProgress = undefined;
         }
         return;
       }
       case "spawn":
         return this.spawn(fx.name, fx.near, fx.requestedBy);
       case "locateChest":
+        return this.locateChest(fx.requestedBy, fx.near);
       case "inspectChest":
-        // TODO(phase-2, Job 6): adapter/world.ts locateChest / readChest -> chestLocated(Failed) / chestInspected.
-        logWarn(`effect ${fx.kind} not implemented yet`);
-        return;
+        return this.inspectChest(fx.to, fx.chest);
     }
   }
 
@@ -206,7 +227,51 @@ class Runtime implements ColonyRuntime {
       return;
     }
     const player = findPlayer(to);
-    if (player) player.sendMessage(line); // offline -> dropped
+    if (player) player.sendMessage(line);
+    else this.bufferReply(to, line); // offline / GameTest sender: kept for recentReplies()
+  }
+
+  private bufferReply(to: PlayerId, line: string): void {
+    let buf = this.offlineReplies.get(to);
+    if (buf) {
+      this.offlineReplies.delete(to); // re-insert: most recently used last
+    } else {
+      buf = [];
+      while (this.offlineReplies.size >= REPLY_BUFFER_IDS) {
+        const oldest = this.offlineReplies.keys().next().value;
+        if (oldest === undefined) break;
+        this.offlineReplies.delete(oldest);
+      }
+    }
+    buf.push(line);
+    if (buf.length > REPLY_BUFFER_PER_ID) buf.splice(0, buf.length - REPLY_BUFFER_PER_ID);
+    this.offlineReplies.set(to, buf);
+  }
+
+  /** `!chest set`: the looked-at / nearby container. GameTest senders have no player -> search near `near`. */
+  private locateChest(requestedBy: PlayerId, near: Vec3): void {
+    let ev: ColonyEvent;
+    try {
+      const res = locateChest(findPlayer(requestedBy), near);
+      ev = res.ok
+        ? { kind: "chestLocated", now: now(), requestedBy, chest: res.chest }
+        : { kind: "chestLocateFailed", now: now(), requestedBy, reason: res.reason };
+    } catch (err) {
+      logError("locateChest failed", err);
+      ev = { kind: "chestLocateFailed", now: now(), requestedBy, reason: "error" };
+    }
+    this.emit(ev);
+  }
+
+  private inspectChest(to: PlayerId, chest: ChestRef): void {
+    let items: ReturnType<typeof readChest>;
+    try {
+      items = readChest(chest);
+    } catch (err) {
+      logError("readChest failed", err);
+      items = undefined;
+    }
+    this.emit({ kind: "chestInspected", now: now(), to, chest, items });
   }
 
   private botName(id: BotId): string {
@@ -240,6 +305,7 @@ class Runtime implements ColonyRuntime {
     logInfo(`${bot.name} died`);
     const ex = bot.executor;
     bot.executor = undefined;
+    bot.lastProgress = undefined;
     bot.respawnAt = t + RESPAWN_DELAY_TICKS;
     bot.respawnAttempts = 0;
     if (ex) this.emit({ kind: "taskReport", now: t, botId: entityId, taskId: ex.taskId, outcome: "failed", reason: "bot_died" });
@@ -293,13 +359,30 @@ class Runtime implements ColonyRuntime {
       ex.cancel();
       r = { kind: "failed", reason: "error" };
     }
+    // Progress first, so the core has the final count when it renders the report.
+    this.emitProgress(id, bot, ex, t);
     if (r.kind === "running") return;
     bot.executor = undefined;
+    bot.lastProgress = undefined;
     this.emit(
       r.kind === "done"
         ? { kind: "taskReport", now: t, botId: id, taskId: ex.taskId, outcome: "done" }
         : { kind: "taskReport", now: t, botId: id, taskId: ex.taskId, outcome: "failed", reason: r.reason },
     );
+  }
+
+  /** taskProgress only when the executor's progress differs from the last value emitted for it. */
+  private emitProgress(id: BotId, bot: BotEntry, ex: TaskExecutor, t: Tick): void {
+    let p: TaskProgress | undefined;
+    try {
+      p = ex.progress();
+    } catch (err) {
+      logError(`${bot.name}: progress() for ${ex.taskId} threw`, err);
+      return;
+    }
+    if (!p || sameProgress(p, bot.lastProgress)) return;
+    bot.lastProgress = { ...p };
+    this.emit({ kind: "taskProgress", now: t, botId: id, taskId: ex.taskId, progress: { ...p } });
   }
 
   private tryRespawn(id: BotId, bot: BotEntry, t: Tick): void {
@@ -323,6 +406,7 @@ class Runtime implements ColonyRuntime {
   /** The core requeues the bot's task on botRemoved, so no taskReport here. */
   private removeBot(id: BotId, bot: BotEntry, reason: string): void {
     bot.executor = undefined;
+    bot.lastProgress = undefined;
     this.bots.delete(id);
     logInfo(`bot ${bot.name} removed (${reason})`);
     this.emit({ kind: "botRemoved", now: now(), botId: id, reason });
@@ -341,6 +425,10 @@ function contextFor(body: WorkerBody): ExecutorContext {
     },
     gather: DEFAULT_GATHER_CONFIG,
   };
+}
+
+function sameProgress(a: TaskProgress, b: TaskProgress | undefined): boolean {
+  return b !== undefined && a.kind === b.kind && a.delivered === b.delivered && a.held === b.held;
 }
 
 function guard(what: string, fn: () => unknown): void {
