@@ -1,0 +1,5 @@
+# Review: S6-verification — game-api
+| # | Severity (blocker/major/minor) | Location (§ / line) | Problem | Exact fix (replacement text, number, or decision) |
+|---|---|---|---|---|
+| 1 | minor | §2.4 `defend_protects_player` lines 480–486 (pass `botHp(prot) ≥ 14`; fail "lost more than 6 HP") | At Normal difficulty a Bedrock zombie hit is 3 HP (Easy 2, Hard 4). 14 passes exactly 2 hits (6 HP), so the test tolerates two hits on the protected player and fails on a third. The threshold has no margin if the zombie lands a third hit. | Add after Setup: "Difficulty is Normal (`enterCombatEnv`, §3.1); zombie hit = 3 HP; 2 hits = 6 HP is the allowed maximum." Keep ≥ 14. |
+| 2 | minor | line 283 INCONCLUSIVE text `cave spider did not poison (Easy difficulty?)` | `enterCombatEnv` forces Normal (line 324), so "Easy difficulty?" can never be the cause. Bedrock cave spider poison applies on Normal (about 7 s) and Hard (about 15 s) only. | Replace with `cave spider did not poison (Normal poison is 7 s; check the hit landed)`. |
