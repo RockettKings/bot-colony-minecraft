@@ -1,0 +1,26 @@
+# Phase 3 cross-doc decisions (Reconciler log)
+
+Seeded by the Lead from agent reports (2026-10-08). The Reconciler pass extends this file. **Revisers and the contract writer treat each "Decision" line as binding.** Status: `decided` (binding), or `open` (the Reconciler must decide).
+
+| # | Source | Mismatch / gap | Decision | Status |
+|---|---|---|---|---|
+| D1 | S2b writer | S2b reaches `Knowledge` through `kb.mob(typeId)`, `kb.food(typeId)` and `kb.value(typeId)`. S2a defines `Knowledge`. | S2a must define `Knowledge` with exactly these three accessors (plus any extra fields it needs). | decided |
+| D2 | S2b writer | S2b requests Percept additions: `Percept.terrain`, `Percept.canBlock`, `Percept.shieldDisabled`, `Percept.objectiveItemIds`, `Percept.tacticFeedback`, `EntityPercept.inWater`. | Add all of them to S1 §1 as **optional** fields with the fallbacks S2b states. `terrain` holds S1 R9's atoms (`groundFlat`, `lowCeilingWithin8`, `coverWithin8`, `roofWithin10`), computed by the sensor. | decided |
+| D3 | S2b writer | `criticalHp` and `switchMargin` may be defined in both S2a and S2b. | One key each, owned by **S2b** (commitment). S2a reads them. | decided |
+| D4 | S2b writer | `BrainState` has no provocation field; S1's `ProvocationMemory` owns provocation. | Keep it in S1. The brain reads it through `EntityPercept.provoked`. | decided |
+| D5 | S2b writer | A creeper within 4 blocks is target tier 0 and pre-empts `threatening_me`. | Accepted. | decided |
+| D6 | S4a writer | S6 names the snapshot timer `snapshot.timerTicks`; S4a uses `snapshot.intervalTicks`. | Use `snapshot.intervalTicks` everywhere. S6 changes. | decided |
+| D7 | S4a writer | S5's `SnapshotFailReason` has no `storage_full`. | Add `"storage_full"` to S5's `SnapshotFailReason`, with a message id and string in S5 §6. | decided |
+| D8 | S4a writer | `EntityItemComponent.itemStack` (d.ts line 12203) is used by the drop scan and probe P4 but isn't in API-MAP. | Add a row to API-MAP (the API verifier or a reviser checks the signature and privilege). | decided |
+| D9 | S4a writer | S4a added store and helper functions beyond the brief: `readDetailed`, `readMeta`, `writeMeta`, `gcAll`, `clearSnapshotted`, `planApplySteps`, `scanDroppedItems`. | Accepted. S4b uses them where relevant. | decided |
+| D10 | S4a writer | Hand-offs to S4b: the P4-says-drops fallback (reload drop scan, `scan_unavailable`); the forced-write contract (a failed write means the body is not cleared); `partial` / `leftover` → `carryover`. | S4b must cover all three in its flows and its failure table. | decided |
+| D11 | Review completeness (S1) | S1's body interfaces (`ReflexBody`, `ControllerBody`) don't match S3's (`BodyActions`, `CombatBody`). | **S3's names win.** S1 replaces `ReflexBody`/`ControllerBody` with `CombatBody` (= `BodyActions` + `BodyReads`), listing which members reflexes use. | decided |
+| D12 | Review completeness (S1) | `buildPercept` and the Percept wiring are undefined; §11 runtime wiring omits hooks other sections need. | S1 reviser adds `buildPercept(reads: BodyReads, world: WorldPort, ctx): Percept` with step-by-step assembly, and completes §11 with hooks for snapshot triggers (S4a), `botStatus` push (S5) and `botNotice` (S5). | decided |
+| D13 | Review completeness (cross) | No section maps a `Decision` to tactic or body calls. | Owned by **S1 §2/§3** (the combat executor in `BotController`): a table of Decision.option → TacticRunner or body call. S3 provides the runners. | decided |
+| D14 | Review completeness (S3) | Tactics don't enforce the leash; there's no unarmed fallback. | S3: each TacticRunner aborts when the target is beyond `leashBlocks` from the nearest objective point (S1 §7). Unarmed means fist damage 1 and the same tactics, and the equipment manager raises an `equipNeed` notice. | decided |
+| D15 | Review completeness (MOBS) | No fallback when no tactic's `when` holds. | Fallback order: `hit_and_back_off` if melee is allowed, else `avoid_path_around`, else `sprint_away`. | decided |
+| D16 | Review completeness (S6) | The Phase 2 gather review (a ROADMAP requirement) is missing from probes, GameTests, DoD and PLAYTEST. | S6 adds a "Phase 2 regression" block: the existing gather GameTests stay green, plus DoD items for pause/resume during gather, and PLAYTEST §I (item pickup) is re-run. | decided |
+| D17 | Review game-api (S1) | `lavaEscapeTicks` = 60 is lethal (lava kills an unarmoured bot in about 50 ticks). | Set it to **20**. | decided |
+| D18 | Review game-api (S1) | Spider neutrality checks `lightLevel >= 12` without a daylight guard. | Add `isDaylight: boolean` to `ClassifyCtx`. Spiders are neutral only when `isDaylight && lightLevel >= 12`. Add probe P15 (light semantics) to API-MAP and S6. | decided |
+| D19 | Review game-api (MOBS) | Evoker id `minecraft:evoker` is wrong. | Use `minecraft:evocation_illager`. | decided |
+| D20 | Review game-api | S1 uses `minecraft:breathable` without an API-MAP row; S3's sharpness formula is Java's; TABLES lists honey_bottle as always edible. | Add a breathable row to API-MAP (verify) or drop it in favour of the S1 inWater fallback. Sharpness = **+1.25 damage per level** (Bedrock). honey_bottle follows normal hunger rules. | decided |
