@@ -34,16 +34,11 @@ npx vitest run test/<file>.test.ts
 - **Push at every checkpoint:** spec done, contracts compile, builders done, reviews done.
 - **Commit author:** Jaycob Campos <jmcampos2005@icloud.com>.
 
-## Agent workflow for each phase
-Lead (Opus) → planners → contract writer → builders → reviewers → lead merges findings, runs check, packs and pushes.
-- **Planners:**
-  - spec architect or section writers (Opus/Sonnet)
-  - API verifier (Opus)
-  - data authors (Sonnet)
-  - test-case author (Sonnet)
-- **Contract writer (Opus):** writes the types and stubs so everything compiles before any builder starts.
-- **Builders:** Sonnet, or Haiku for transcription and docs. Each owns a disjoint file list (`PHASE3-SPEC.md` §6) and reports out-of-scope problems instead of editing other files.
-- **Reviewers:** Opus for correctness, integration, item conservation and API accuracy; Sonnet or Haiku for game knowledge, tests and docs.
+## Agent workflow
+- **Roles and the brief template:** see `docs/ROLES.md`. Each agent gets one narrow role, one brief, a fixed list of input files to read, one output file and a size budget.
+- **Two stages per phase:**
+  - **Docs stage:** only documents. No edits under `src/`, `test/`, `scripts/` or `packs/`.
+  - **Code stage:** starts only after Jaycob approves the spec.
 
 ## Current state (update this section at every checkpoint)
 - **Phase 1** (walking skeleton): done.
@@ -51,11 +46,12 @@ Lead (Opus) → planners → contract writer → builders → reviewers → lead
 - **Phase 3** (Combat I), branch `phase-3-combat`. Planning is in progress:
   - **Done:** `ROADMAP.md`, `phase3/API-MAP.md`, `MOBS.md`, `TABLES.md`, and the `PHASE3-SPEC.md` skeleton (architecture, vocabulary, jobs).
   - **Section specs done:** S1 (stack and sensing), S3 (body), S5 (commands), S6 (verification).
-  - **Missing:** S2 (decision loop: scoring formulas, hysteresis, outcome stats, worked examples) and S4 (snapshot system: schema, store, flows, exactly-once restore, conservation invariants). Both writers were cut off by usage limits.
+  - **Stage:** Docs stage. **No code until Jaycob approves.**
+  - **Missing sections, now split smaller:** S2a (scoring), S2b (commitment, tactics, examples), S4a (snapshot data, codec, store), S4b (snapshot flows, invariants). See `PHASE3-SPEC.md` §5.
   - **Next:**
-    1. Write S2 and S4.
-    2. The contract writer reconciles S1–S6 (S5 lists the event and effect names S4 must use; S3 §10 and S6 §0 list requests for the contract writer), records decisions in `PHASE3-SPEC.md` §14, and writes the types and stubs.
-    3. The test-case author writes `docs/phase3/TEST-CASES.md`.
-    4. **Jaycob reviews the spec.**
-    5. Builders B1–B7, then reviewers R1–R8 (including the Phase 2 gather review).
+    1. Run S2a ∥ S4a, then S2b ∥ S4b.
+    2. The Reconciler writes `docs/phase3/DECISIONS.md`.
+    3. Case Writers and Doc Reviewers.
+    4. **Jaycob approves.**
+    5. Code stage.
 - **Phase 3 in-game probes** to run once built: P0 is disconnect (do items drop?), invchange, attack, shield and eating. See S6.

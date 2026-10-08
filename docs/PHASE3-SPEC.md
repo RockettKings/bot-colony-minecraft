@@ -102,24 +102,28 @@ All of these live in `src/core/combat/types.ts` or `src/core/snapshot/types.ts`,
 - Resume re-plans: gather re-scans from current progress, goto re-paths.
 - `step()` is not called while paused.
 
-## 5. Section files (written in parallel; each owns one file)
+## 5. Section files (Docs stage; roles from docs/ROLES.md)
 
-| Id | File | Covers | Writer |
-|---|---|---|---|
-| S1 | `docs/phase3/spec/S1-stack-sensing.md` | Priority stack state machine, `BotController` lifecycle, executor pause/resume, sensor, `Percept` fields, classification, provocation, objective relevance geometry, leash, defend-zone relevance, reflexes (warden trigger, lava/fire/drowning) | Opus |
-| S2 | `docs/phase3/spec/S2-decision.md` | Scoring formulas for every option, cargo/gear/death-cost inputs from TABLES.md, commitment and hysteresis, tie-breaks, outcome stats and tactic selection, worked examples, `FoodEntry`/value shapes and food choice per situation | Opus |
-| S3 | `docs/phase3/spec/S3-body.md` | `BodyActions` port, each MOBS.md tactic as a per-tick action script, melee micro, shield, eating execution, equipment manager (selection order, durability swap, chest fetch, ask-in-chat), `MobEntry` TS shape | Sonnet |
-| S4 | `docs/phase3/spec/S4-snapshot.md` | Snapshot schema, storage, write triggers, flows (dismiss, summon/rejoin, escape, idle self-dismiss, Save & Quit restore, owner offline), exactly-once restore, conservation invariants, failure handling, excluded items, haul delivery | Opus |
-| S5 | `docs/phase3/spec/S5-commands.md` | Grammar and colony semantics for `!defend`, `!home set`, `!summon`, `!dismiss`, `!recall`, `!status`; owner concept; new ColonyEvents, Effects and BotView fields; interplay with offers/override/queue; exact chat strings | Sonnet |
-| S6 | `docs/phase3/spec/S6-verification.md` | Probes (all 14 from API-MAP.md, prioritised), GameTests, the builder rules list, the Definition of Done list (§13 here gets it), test-file layout | Sonnet |
+| Id | File | Covers | Role | Status |
+|---|---|---|---|---|
+| S1 | `spec/S1-stack-sensing.md` | Priority stack, `BotController`, executor pause/resume, sensor, `Percept`, classification, relevance, leash, reflexes | Section Writer (Opus) | done |
+| S2a | `spec/S2a-scoring.md` | Derived quantities (threat, DPS, time to kill and die, death risk, cargo/gear/objective values, canEatSafely) and the score formula per option | Section Writer (Opus) | todo |
+| S2b | `spec/S2b-commit-tactics.md` | Commitment and hysteresis, target selection, food choice per situation, outcome stats and tactic selection, ≥ 8 worked examples | Section Writer (Opus) | todo, after S2a |
+| S3 | `spec/S3-body.md` | `BodyActions`, tactic scripts, melee, shield, eating, equipment | Section Writer (Sonnet) | done |
+| S4a | `spec/S4a-snapshot-data.md` | Snapshot types, excluded items, codec, store (write-then-commit), write triggers | Section Writer (Opus) | todo |
+| S4b | `spec/S4b-snapshot-flows.md` | Flows (dismiss, summon, escape, idle, Save & Quit, haul), exactly-once restore, invariants, failure table, event payloads | Section Writer (Opus) | todo, after S4a |
+| S5 | `spec/S5-commands.md` | Commands, owner, home, events/effects names, strings, `!status` | Section Writer (Sonnet) | done |
+| S6 | `spec/S6-verification.md` | Probes, GameTests, builder rules, DoD | Section Writer (Sonnet) | done |
+| – | `DECISIONS.md` | Cross-section name and field mismatches resolved | Reconciler (Opus) | after all sections |
+| – | `cases/<id>.md` | Given/when/then cases per section | Case Writer (Sonnet) | after DECISIONS |
 
-**Conflict rule:** if two sections disagree, the contract writer decides and records the decision in §14 below.
+Docs-stage order: S2a ∥ S4a → S2b ∥ S4b → Reconciler → Case Writers ∥ Doc Reviewers → **Jaycob approves** → Code stage.
 
-## 6. Jobs (builders, run in parallel, disjoint files)
+## 6. Code-stage modules (after approval; Implementer role, one module each, disjoint files)
 
 The contract writer owns every `types.ts`, `ports.ts` addition, `config.ts`, the `Executor` interface change, and the stub files. Builders fill in bodies.
 
-| Job | Model | Owns (create or edit) | Test cases |
+| Module | Model | Owns (create or edit) | Case file |
 |---|---|---|---|
 | B1 Combat brain | Sonnet | `src/core/combat/sense.ts`, `brain.ts`, `stats.ts`, `scoring.ts`; tests `test/combat-sense.test.ts`, `test/combat-brain.test.ts`, `test/combat-stats.test.ts` | TC-B1 |
 | B2 Knowledge modules | Haiku | `src/core/combat/mobs.ts`, `food.ts`, `values.ts` (data and lookups); `config.ts` default values only; tests `test/combat-kb.test.ts` | TC-B2 |
