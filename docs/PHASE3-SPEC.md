@@ -126,7 +126,7 @@ The contract writer owns every `types.ts`, `ports.ts` addition, `config.ts`, the
 | Module | Model | Owns (create or edit) | Case file |
 |---|---|---|---|
 | B1 Combat brain | Sonnet | `src/core/combat/sense.ts`, `brain.ts`, `stats.ts`, `scoring.ts`; tests `test/combat-sense.test.ts`, `test/combat-brain.test.ts`, `test/combat-stats.test.ts` | TC-B1 |
-| B2 Knowledge modules | Haiku | `src/core/combat/mobs.ts`, `food.ts`, `values.ts` (data and lookups); `config.ts` default values only; tests `test/combat-kb.test.ts` | TC-B2 |
+| B2 Knowledge modules | Haiku | `src/core/combat/mobs.ts`, `food.ts`, `values.ts`, `knowledge.ts` (data and lookups); `config.ts` default values only; tests `test/combat-kb.test.ts` | TC-B2 |
 | B3 Priority stack | Sonnet | `src/game/bots/controller.ts`, `sensor.ts`, `combat-executor.ts`; pause/resume bodies in `gather-executor.ts`, `goto-executor.ts`, and the new `defend-executor.ts`; `src/game/runtime.ts`; `src/game/bots/registry.ts`; `src/gametests/combat.ts`; tests `test/controller.test.ts`, `test/sensor.test.ts`, `test/defend-executor.test.ts` | TC-B3 |
 | B4 Snapshot | Sonnet | `src/core/snapshot/codec.ts`, `machine.ts`; `src/game/snapshot/store.ts`, `service.ts`; tests `test/snapshot-*.test.ts` | TC-B4 |
 | B5 Body control | Sonnet | `src/game/bots/body/*.ts`; adapter additions in `src/game/adapter/body.ts` (new file); `src/probes/combat/*.ts`; tests `test/body-*.test.ts` | TC-B5 |

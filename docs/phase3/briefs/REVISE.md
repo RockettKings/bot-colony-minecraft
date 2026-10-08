@@ -6,6 +6,7 @@ You apply review findings to **the documents your brief assigns** (one at a time
 - The document.
 - Every file matching `docs/phase3/reviews/<DOC>--*.md`.
 - Any cross-referenced files a finding points to (read only the cited sections).
+- `docs/phase3/DECISIONS.md`: **binding.** Apply every decision row that names your document, even if no review finding asks for it. If a review finding contradicts a decision, the decision wins.
 
 ## Steps
 1. **Apply** every blocker and major finding. Apply minor findings when they're cheap.
