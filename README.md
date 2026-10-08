@@ -27,7 +27,7 @@ Chat command → parse → task → bot executes → bot replies, on a world wit
 
 ## Roadmap
 
-1. Walking skeleton (done) · 2. Gatherers (current) · 3. Builders · 4. Commander (rule-based goals → multi-bot task graphs) · 5. Guards · 6. Scale and outposts · 7. Learned combat (trained offline, shipped as JS weights) · 8. Persistence.
+1. Walking skeleton (done) · 2. Gatherers (built) · 3. Combat I (in planning) · 4. Home logistics (sorter) · 5. Combat II · 6. Harvesters v2 (`!mine`) · 7. Scale and outposts · 8. Learned combat · 9. Persistence. Details: [docs/ROADMAP.md](docs/ROADMAP.md). Code layout: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
