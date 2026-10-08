@@ -43,15 +43,31 @@ npx vitest run test/<file>.test.ts
 ## Current state (update this section at every checkpoint)
 - **Phase 1** (walking skeleton): done.
 - **Phase 2** (gatherers: `!chest set`, `!gather`, tools, crafting): built at commit `d2526a2`. 548 tests pass. Not yet reviewed; it gets reviewed inside Phase 3.
-- **Phase 3** (Combat I), branch `phase-3-combat`. Planning is in progress:
-  - **Done:** `ROADMAP.md`, `phase3/API-MAP.md`, `MOBS.md`, `TABLES.md`, and the `PHASE3-SPEC.md` skeleton (architecture, vocabulary, jobs).
-  - **Section specs done:** S1 (stack and sensing), S3 (body), S5 (commands), S6 (verification).
-  - **Stage:** Docs stage. **No code until Jaycob approves.**
-  - **Missing sections, now split smaller:** S2a (scoring), S2b (commitment, tactics, examples), S4a (snapshot data, codec, store), S4b (snapshot flows, invariants). See `PHASE3-SPEC.md` §5.
-  - **Next:**
-    1. Run S2a ∥ S4a, then S2b ∥ S4b.
-    2. The Reconciler writes `docs/phase3/DECISIONS.md`.
-    3. Case Writers and Doc Reviewers.
-    4. **Jaycob approves.**
-    5. Code stage.
+- **Phase 3** (Combat I), branch `phase-3-combat`. **Docs stage: no code until Jaycob approves.**
+  - **Plan:** documents only, 20 agents on Sonnet (high effort), using the briefs in `docs/phase3/briefs/` (COMMON, REVIEW, REVISE, S2a, S2b, S4a, S4b).
+  - **Spec sections done:** S1, S3, S5, S6 (plus API-MAP, MOBS, TABLES), and from wave 1, **S2b** and **S4a**.
+  - **Reviews of the existing docs done:** the `game-api` and `completeness` lenses, in `docs/phase3/reviews/<DOC>--<lens>.md`.
+
+  **RESUME HERE (stopped 2026-10-08 by the usage limit). Remaining agents, all Sonnet, high effort:**
+  - **Wave 1 leftovers (parallel):**
+    - Writer S2a (`briefs/S2a.md`).
+    - Writer S4b (`briefs/S4b.md`).
+    - Reviewers for the existing group, lens `precision` and lens `consistency` (prompt: "Role: Doc Reviewer, lens = X, group = existing. Read briefs/COMMON.md then briefs/REVIEW.md…").
+    - Notes for S2a: S2b assumed `Knowledge` accessors `kb.mob`, `kb.food` and `kb.value`, and requested Percept additions (`terrain`, `canBlock`, `shieldDisabled`, `objectiveItemIds`, `tacticFeedback`, `EntityPercept.inWater`). S2a should adopt or define these.
+  - **Wave 2 (parallel, after wave 1):**
+    - 5 reviewers on the **new** group (S2a, S2b, S4a, S4b), one per lens: precision, consistency, game-api, logic, completeness.
+    - 3 revisers on the **existing** group (`briefs/REVISE.md`), one each:
+      1. S1 + S6
+      2. S3 + S5
+      3. MOBS + TABLES + API-MAP
+    - **Note: the existing-group `logic` review never ran.** Run it before the revisers, or add it to wave 2.
+  - **Wave 3:** 3 revisers on the new group, one each:
+    1. S2a + S2b
+    2. S4a
+    3. S4b
+  - **Then:**
+    1. The Reconciler writes `docs/phase3/DECISIONS.md` (S4a and S2b both listed cross-doc mismatches).
+    2. Update this section.
+    3. Push.
+    4. Send the spec to Jaycob for approval.
 - **Phase 3 in-game probes** to run once built: P0 is disconnect (do items drop?), invchange, attack, shield and eating. See S6.
