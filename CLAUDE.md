@@ -53,11 +53,13 @@ npx vitest run test/<file>.test.ts
   - **Review coverage, pass 1:**
     - The existing docs (S1, S3, S5, S6, MOBS, TABLES, API-MAP) had all 5 lenses (precision, consistency, game-api, logic, completeness), and the findings were applied.
     - The new docs (S2a, S2b, S4a, S4b) only had `DECISIONS.md` and the S2a precision findings applied. **They haven't had a full review yet.**
-  - **Next (Jaycob: "get all the documentation done first, then review it after"):**
-    1. **Review pass 2:** all 5 lenses over all 11 docs, with emphasis on the new ones. Close `DECISIONS.md` D31.
-    2. Revisers apply the pass-2 findings.
-    3. Case Writers write `docs/phase3/cases/`.
-    4. **Jaycob approves.**
-    5. Code stage: contract writer, then implementers.
+  - **Review pass 2: in progress, stopped by Jaycob on 2026-10-09.**
+    - **Done:** the game-api review of the new docs (`reviews/<DOC>--game-api--p2.md` for S2a, S2b, S4a, S4b: 28 findings, no blockers by severity).
+      - **Key issues found:** the S4a Save & Quit drop scan can duplicate items (merged item entities, 8-block radius); S2a/S2b still list honey_bottle (contradicts D20); D31 is only partly closed.
+    - **Not run yet:**
+      - New-group lenses: precision, consistency, logic, completeness.
+      - Seam-A consistency (S1, S3, S6) and seam-B consistency (S5, MOBS, TABLES, API-MAP).
+      - The prompts are the same as for game-api; see `briefs/REVIEW.md` § "Pass 2".
+  - **After pass 2:** revisers apply the `--p2` findings, Case Writers write `docs/phase3/cases/`, **Jaycob approves**, then the code stage.
   - **Briefs:** `docs/phase3/briefs/` (COMMON, REVIEW, REVISE, S2a, S2b, S4a, S4b). For pass 2, reviewers write `reviews/<DOC>--<lens>--p2.md`.
 - **Phase 3 in-game probes** to run once built: P0 is disconnect (do items drop?), invchange, attack, shield and eating. See S6.
