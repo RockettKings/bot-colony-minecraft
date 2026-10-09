@@ -2,7 +2,7 @@
 
 Edition: Minecraft **Bedrock**, game 1.26.5x. Difficulty: **Normal** unless a value is given per difficulty. Bots are survival simulated players: iron sword, shield in offhand, armour, melee only (no bows until Phase 5). Bots fight mobs only, never players.
 
-Tag `# (verify)` on a line = best-guess Bedrock value not confirmed from a primary source. The TS transcription should keep the value and add the field name to a `verify: string[]` on that entry (field name = the YAML key on the tagged line; for a tactic line use `tactics`, for notes use `notes`). Every `(verify)` is also a candidate for an in-game probe or the Phase 3 outcome logs.
+Tag `# (verify)` on a line = best-guess Bedrock value not confirmed from a primary source. The TS transcription should keep the value and add the field name to a `verify: string[]` on that entry (field name = the YAML key on the tagged line; for a tactic line use `tactics`, for notes use `notes`). Every `(verify)` is also a candidate for an in-game probe or the Phase 3 outcome logs. A line tagged `(assumed value, no probe; behaviour does not depend on it)` is NOT a verify tag: keep the value, do not add it to `verify[]`.
 
 Section numbering follows the task list: 1 fields, 2 lists, 3 Phase 3 mobs, 4 Phase 5 stubs, 5 TACTICS catalogue, 6 default entry. Fields in section 3 reference tactics by name from **section 5**.
 
@@ -14,7 +14,7 @@ Section numbering follows the task list: 1 fields, 2 lists, 3 Phase 3 mobs, 4 Ph
 - Distances: blocks. Time: ticks (20 ticks = 1 s). Health: HP points (1 heart = 2 HP). Bot max HP = 20.
 - Bot movement (approx.): walk 4.3 b/s, sprint 5.6 b/s, sneak/shield-up about 1.3 b/s (verify). Jump apex about 6 ticks after take-off; airborne about 12 ticks total on flat ground.
 - Bot melee reach: 3 blocks eye-to-target-hitbox (verify). Most melee mobs reach about 2 blocks (verify).
-- Bedrock has **no attack cooldown** (verify with the `attackEntity` probe) but a mob that was just damaged is invulnerable to equal-or-weaker damage for about **10 ticks** (verify). Minimum useful attack interval for the bot = `MIN_ATTACK_INTERVAL_TICKS = 10`.
+- Bedrock has **no attack cooldown** (verify with the `attackEntity` probe) but a mob that was just damaged is invulnerable to equal-or-weaker damage for about **10 ticks** (verify). Minimum useful attack interval for the bot = 10 ticks. Config names: `config.body.meleeReach` (3.0) and `config.body.attackIntervalTicks` (10); there is no separate `MIN_ATTACK_INTERVAL_TICKS` constant in code.
 - Critical hit = x1.5 damage, applies when the attacker is airborne and falling (y velocity < 0), not in water, not climbing. No sprint requirement in Bedrock (verify). No sweep attack in Bedrock.
 - Sprint-hit knockback is larger than a standing hit; sprint is reset by the hit (verify).
 - Weapon damage (Bedrock): wooden 4, gold 4, stone 5, iron 6, diamond 7, netherite 8 (verify). Axes: wooden 3, stone 4, iron 5, diamond 6, netherite 7 (verify). Axes disable an enemy shield for about 100 ticks (verify).
@@ -28,7 +28,7 @@ All entries use exactly these keys in this order (Phase 5 stubs and the default 
 |---|---|---|
 | `id` | string | Exact Bedrock id with `minecraft:` prefix. The entry's key in the table. |
 | `variants` | string[] | Other ids that use this entry unchanged. `[]` if none. |
-| `phase` | 3 or 5 | Roadmap phase in which the bot actually fights it. Phase 5 entries are avoid/flee stubs. |
+| `phase` | 0, 3 or 5 | Roadmap phase in which the bot actually fights it (0 only for the default entry in section 6). Phase 5 entries are avoid/flee stubs. |
 | `hp` | number | Max health, HP points. |
 | `attack_damage` | `{easy, normal, hard}` | Damage per hit in HP before armour. For ranged mobs: per projectile hit. For creeper: max explosion damage at point blank, unarmoured. |
 | `attack_range_blocks` | number | Distance at which the mob can hurt the bot: melee reach, projectile range, or creeper ignition distance. |
@@ -38,7 +38,7 @@ All entries use exactly these keys in this order (Phase 5 stubs and the default 
 | `engage_policy` | enum | See ENGAGE_POLICY below. |
 | `preferred_range_blocks` | `{min, max}` | Distance band the bot tries to hold from this mob when it is **not** executing a tactic strike step. `min: 0` means "melee range is fine". |
 | `tactics` | list of `{name, when}` | Ranked best first. `name` = a name from section 5. `when` = a condition string from the CONDITION grammar (below). The decision loop takes the first tactic whose `when` is true and whose gear/preconditions in section 5 hold. |
-| `counter_gear` | string[] | Gear that helps: `shield`, `sword`, `axe`, `armor`, `carved_pumpkin`, `food`, `milk_bucket`, `water_bucket`, `blocks`, `none`. Informational for the equipment manager. |
+| `counter_gear` | string[] | Gear that helps: `shield`, `sword`, `axe`, `armor`, `carved_pumpkin`, `food`, `milk_bucket`, `water_bucket`, `blocks`, `none`. Informational for the equipment manager. Phase 3 consumers read only the kinds `shield`, `bow`, `crossbow`, `trident`; all other kinds are documentation. |
 | `do` | string[] | Concrete rules the loop must follow. |
 | `dont` | string[] | Concrete rules the loop must never violate. |
 | `flee_if` | list | Conditions that switch to `retreat_and_regen` / `sprint_away` / `flee_sneak` (per entry's tactics). Grammar below. |
@@ -54,13 +54,47 @@ All entries use exactly these keys in this order (Phase 5 stubs and the default 
 `burns_in_daylight`, `breaks_doors_hard`, `inflicts_hunger`, `poison`, `slowness`, `weakness`, `explodes`, `teleports`, `gaze_aggro`, `water_vulnerable`, `ranged_projectile`, `throws_potions`, `self_heals`, `climbs_walls`, `jump_attack`, `splits_on_death`, `hides_in_blocks`, `calls_allies`, `flying`, `swoops`, `vibration_sensing`, `ignores_shield`, `ignores_armor`, `darkness_pulse`, `fire_immune`, `bad_omen_if_captain`, `neutral_in_daylight`, `pearl_aggro_endermen`.
 
 ### 1.5 CONDITION grammar
-Used in `tactics[].when` and `flee_if`. A condition is one of these atoms, or a conjunction written `a AND b`. No other atoms are allowed.
+Used in `tactics[].when` and `flee_if`. A condition is a list of terms joined by `AND` and `OR` (uppercase, single spaces). `AND` binds tighter than `OR`. There are no parentheses and no `NOT` operator: negation exists only as the `not_` prefix on a boolean atom. A term is an atom, optionally prefixed `not_` (boolean atoms only) and optionally followed by `: N` (numeric atoms only). Examples: `not_mob_is_baby AND ground_flat AND count_at_least: 1`; `mob_in_water OR bot_in_water`; `hostile_count_at_least: 3 OR hp_below: 10` (parses as `a OR b`). No other atoms are allowed. A `flee_if` list is an implicit `OR` of its items.
 
 State atoms (booleans): `always`, `mob_in_water`, `bot_in_water`, `mob_is_baby`, `mob_hissing` (creeper ignition started; if the API cannot read it, use `dist_below: 3` as a proxy), `mob_aggroed_on_bot`, `mob_has_los`, `bot_has_shield`, `bot_shield_disabled`, `has_cover_within_8`, `has_low_ceiling_within_8` (a 2-block-high space the bot can stand in), `has_roof_within_10`, `ground_flat` (no ledge/slope within 3 blocks of the planned fight spot), `mob_is_diving` (phantom in a swoop), `is_daylight`, `is_thunderstorm`, `mob_charged`, `mob_size_large`, `mob_size_medium`, `mob_size_small`, `target_is_objective_blocker`.
 
 Numeric atoms: `hp_below: N`, `hp_at_least: N`, `dist_below: N`, `dist_at_least: N`, `count_at_least: N` (mobs of this type within 12 blocks), `hostile_count_at_least: N` (all hostile mobs within 12 blocks), `poisoned_and_hp_below: N`, `slowed_and_hp_below: N`, `wither_and_hp_below: N`, `shield_durability_below_pct: N`, `armor_durability_below_pct: N`.
 
 Negation: prefix `not_` on any boolean atom (`not_bot_has_shield`).
+
+### 1.6 Atom evaluation
+Each atom is evaluated per (bot percept `p`, target `e`). `p` = `Percept`, `e` = `EntityPercept` (S1 section 1). Implementation: `evalCondition` in `stats.ts` (S2b section 6.1 is the executable form; this table is the contract it must match). Optional fields are the D2 additions; the fallback applies when the field is missing.
+
+| Atom | Source | True when |
+|---|---|---|
+| `always` | n/a | always |
+| `mob_in_water` | `e.inWater` | `e.inWater === true` (missing: false) |
+| `bot_in_water` | `p.self.inWater` | true |
+| `mob_is_baby` | `e.isBaby` | true |
+| `mob_hissing` | `e.isIgnited`, `e.typeId`, `e.distance` | `e.isIgnited`, or (`e.typeId === "minecraft:creeper"` and `e.distance < 3`; the proxy) |
+| `mob_aggroed_on_bot` | `e.targetingMe` | true |
+| `mob_has_los` | `e.lineOfSight` | true |
+| `bot_has_shield` | S2a `hasUsableShield(p)` | a shield is in the offhand (or a shield slot) with durability at least `config.combat.shieldMinDurabilityFrac` |
+| `bot_shield_disabled` | `p.shieldDisabled` | `=== true` (missing: false) |
+| `has_cover_within_8` | `p.terrain.coverWithin8` | true (missing: false) |
+| `has_low_ceiling_within_8` | `p.terrain.lowCeilingWithin8` | true (missing: false) |
+| `has_roof_within_10` | `p.terrain.roofWithin10` | true (missing: false) |
+| `ground_flat` | `p.terrain.groundFlat` | true (missing: **true**) |
+| `mob_is_diving` | `e.velocity`, `e.pos` | `e.velocity.y < -0.1` and the horizontal (x,z) distance from the bot to `e.pos` is below 8 |
+| `is_daylight` | `p.env.isDaylight` | true |
+| `is_thunderstorm` | `p.env.thunderstorm` | true |
+| `mob_charged` | `e.isCharged` | true |
+| `mob_size_large` / `_medium` / `_small` | `e.maxHp ?? e.hp`, else `e.aabb` | Only for `minecraft:slime` and `minecraft:magma_cube`; false for every other mob. By max HP `mh`: large `mh >= 9`, medium `3 <= mh < 9`, small `mh < 3` (size 4, 2, 1 have 16, 4, 1 HP). If `mh` is unknown use the box width `w = 2 * aabb.extent.x`: large `w >= 1.5`, medium `0.75 <= w < 1.5`, small `w < 0.75` (widths about 2.04, 1.02, 0.51). No hp and no box: large |
+| `target_is_objective_blocker` | `e.relevance` | `=== "blocking_objective"` |
+| `hp_below: N` / `hp_at_least: N` | `p.self.hp` | `hp < N` / `hp >= N` |
+| `dist_below: N` / `dist_at_least: N` | `e.distance` | `< N` / `>= N` |
+| `count_at_least: N` | threats of `e.typeId` | count within `config.combat.countRadius` (12) is `>= N` (includes `e`) |
+| `hostile_count_at_least: N` | all threats | count within `config.combat.countRadius` (12) is `>= N` (includes `e`) |
+| `poisoned_and_hp_below: N` | effect `minecraft:poison` | active and `hp < N` |
+| `slowed_and_hp_below: N` | effect `minecraft:slowness` | active and `hp < N` |
+| `wither_and_hp_below: N` | effect `minecraft:wither` | active and `hp < N` |
+| `shield_durability_below_pct: N` | equipment | a shield is held and `round(durabilityFrac * 100) < N` |
+| `armor_durability_below_pct: N` | equipment | at least one armour piece exists and the lowest `round(durabilityFrac * 100) < N` |
 
 ---
 
@@ -78,7 +112,7 @@ NEVER_TARGET:
     - minecraft:wandering_trader
     - minecraft:iron_golem
     - minecraft:snow_golem
-    - minecraft:copper_golem      # (verify) id exists in 1.26
+    - minecraft:copper_golem      # (assumed value, no probe; behaviour does not depend on it) id is in @minecraft/vanilla-data 1.26.52
     - minecraft:allay
     - minecraft:npc
     - minecraft:armor_stand
@@ -138,7 +172,7 @@ NEUTRAL_UNTIL_PROVOKED:
     response: move away
     never: hit the trader or llamas
   - id: minecraft:spider
-    aggro_when: it is dark (low light) or the bot damages it; neutral in bright light/daylight (verify light threshold)
+    aggro_when: provoked (the bot damages it), or NOT (`is_daylight` AND light level at its feet >= 12). It is neutral only when both hold (D18); unknown light = hostile. Light 12 per config `spiderNeutralLight`; probe P15 (light semantics)
     response: section 3 entry
   - id: minecraft:cave_spider
     aggro_when: ALWAYS hostile in Bedrock regardless of light (verify)
@@ -167,9 +201,17 @@ NEUTRAL_UNTIL_PROVOKED:
   - id: minecraft:pufferfish
     aggro_when: touched in water -> poison + nausea + hunger
     response: leave water area; do not melee
+  - id: minecraft:sulfur_cube          # newer mob, id in @minecraft/vanilla-data 1.26.52; behaviour unknown (verify)
+    aggro_when: damaged by the bot
+    response: ignore; path around
+    never: hit
+  - id: minecraft:nautilus             # newer mob, id in @minecraft/vanilla-data 1.26.52; behaviour unknown (verify)
+    aggro_when: damaged by the bot
+    response: ignore
+    never: hit
 ```
 
-Transcription note: `minecraft:iron_golem` stays in NEVER_TARGET. Keep it in this list only as a "do not provoke" marker (set `neverTarget: true` in TS).
+Transcription note: `minecraft:iron_golem` stays in NEVER_TARGET. Keep it in this list only as a "do not provoke" marker (set `neverTarget: true` in TS). `minecraft:cave_spider` is not neutral: it is a threat (section 3) and is not part of `NEUTRAL_UNTIL_PROVOKED`. `minecraft:iron_golem` and `minecraft:cave_spider` are the only two entries in 2.2 that are not copied to `NEUTRAL_UNTIL_PROVOKED_IDS`.
 
 ### 2.3 IGNORE
 Passive mobs. Never a threat, never targeted, never chased. They only matter as obstacles for pathing and as shield-line-of-fire friendlies.
@@ -263,11 +305,13 @@ engage_policy: engage
 preferred_range_blocks: {min: 2.5, max: 3}
 tactics:
   - name: melee_crit
-    when: ground_flat
-  - name: hit_and_back_off
-    when: count_at_least: 2
+    when: not_mob_is_baby AND ground_flat
+  - name: melee_strafe
+    when: mob_is_baby
   - name: shield_hold
     when: count_at_least: 3
+  - name: hit_and_back_off
+    when: count_at_least: 2
 counter_gear: [sword, shield, armor, food]
 do:
   - Fight like a zombie; kill before it lands a second hit to limit Hunger.
@@ -278,7 +322,7 @@ dont:
   - Do not retreat to burn it; husks do not burn in daylight.
 flee_if: [hp_below: 8, count_at_least: 5]
 notes: >
-  Immune to daylight burn. Hit applies Hunger (about 7 s on Normal, scaled with difficulty; verify). 4 iron-sword hits (3 crits).
+  Immune to daylight burn. Hit applies Hunger (about 7 s on Normal, scaled with difficulty; assumed value, no probe; behaviour does not depend on it). 4 iron-sword hits (3 crits).
   Desert only (and temples/villages). Same base stats as the zombie.
 ```
 
@@ -313,8 +357,9 @@ dont:
   - Do not stand on a one-block ledge above deep water.
 flee_if: [hp_below: 8, bot_in_water AND hp_below: 12, count_at_least: 4]
 notes: >
-  Spawns in deep water and, at night, from zombie drowning conversion. On land behaves like a zombie. Burn in daylight: assumed NOT (verify).
+  Spawns in deep water and, at night, from zombie drowning conversion. On land behaves like a zombie.
   Trident carriers (about 6-15% of spawns, verify) throw tridents at up to about 12 blocks; shield blocks them.
+  Does not burn in daylight (verify once with the first drowned seen); do not use `burns_in_daylight` for it.
   Drowned in water: danger 6, engage_policy avoid; only fight if it blocks the objective AND the bot has air.
 ```
 
@@ -332,7 +377,7 @@ engage_policy: engage
 preferred_range_blocks: {min: 2.5, max: 3}
 tactics:
   - name: melee_crit
-    when: ground_flat
+    when: not_mob_is_baby AND ground_flat
   - name: melee_strafe
     when: mob_is_baby
   - name: shield_hold
@@ -363,21 +408,21 @@ preferred_range_blocks: {min: 2.5, max: 3}
 tactics:
   - name: melee_strafe
     when: ground_flat AND not_mob_is_baby
-  - name: hit_and_back_off
-    when: always
   - name: shield_hold
     when: count_at_least: 3
+  - name: hit_and_back_off
+    when: always
 counter_gear: [sword, shield, armor]
 do:
   - Fight on flat ground away from walls; a spider on a wall or ceiling jumps onto the bot from above.
   - Stand with a block behind (not a ledge) so the spider cannot flank; move out of 3-block-high gaps it can climb.
-  - In daylight (bright light) leave it alone unless it has attacked the bot.
+  - In daylight with light level >= 12 at the spider's feet (`is_daylight` AND `lightLevel >= 12`, D18) leave it alone unless it has attacked the bot. At night, or in a dark cave in daytime, it is hostile.
 dont:
   - Do not fight at the base of a cliff or tree where it can climb above the bot.
   - Do not try to outrun it; it is as fast as a sprinting bot.
 flee_if: [hp_below: 8, count_at_least: 4]
 notes: >
-  Wide hitbox (1.4) but only 0.9 tall. Leaps at its target from about 4 blocks (jump_attack). Neutral in daylight/bright light until hit (verify threshold).
+  Wide hitbox (1.4) but only 0.9 tall. Leaps at its target from about 4 blocks (jump_attack). Neutral only when `is_daylight` AND light level at its feet >= 12 (config `spiderNeutralLight`; probe P15), until hit; unknown light = hostile.
   3 iron-sword hits (2 crits). Spider jockeys: skeleton on top shoots; kill the skeleton first with shield up.
 ```
 
@@ -394,12 +439,12 @@ danger: 4
 engage_policy: engage
 preferred_range_blocks: {min: 1.5, max: 3}
 tactics:
-  - name: melee_strafe
-    when: always
-  - name: hit_and_back_off
-    when: poisoned_and_hp_below: 12
   - name: retreat_and_regen
     when: poisoned_and_hp_below: 8
+  - name: hit_and_back_off
+    when: poisoned_and_hp_below: 12
+  - name: melee_strafe
+    when: always
 counter_gear: [sword, shield, armor, milk_bucket, food]
 do:
   - Kill each in 2 hits (6 dmg x 2 on 12 HP); do not wait to be bitten.
@@ -408,6 +453,7 @@ do:
 dont:
   - Do not stay in a 1-wide tunnel with cave spiders on both sides; they fit through 1-block gaps.
   - Do not eat spider eyes or poisoned food to "cure" poison.
+  - Do not stand in cobwebs (mineshafts); never fight beside the spawner without a roof.
 flee_if: [poisoned_and_hp_below: 8, count_at_least: 4]
 notes: >
   Poison I: Easy none, Normal about 7 s, Hard about 15 s (verify). Bedrock cave spiders are hostile in any light (verify). Hitbox 0.7x0.5 can enter 1-block gaps.
@@ -435,6 +481,10 @@ tactics:
     when: dist_below: 4
   - name: shield_hold
     when: count_at_least: 2
+  - name: retreat_and_regen
+    when: hp_below: 10
+  - name: break_line_of_sight
+    when: always
 counter_gear: [shield, sword, armor]
 do:
   - Close in with the shield up (or zig-zag if the shield is down) and finish with melee_strafe at 2-3 blocks.
@@ -450,6 +500,7 @@ notes: >
   Strafes while shooting. Shot interval about 1-3 s (verify). Arrow hits are about 1-6 depending on difficulty and draw (verify). Aims at the target's current position: lateral motion dodges.
   Burns in daylight unless under a roof or wearing a helmet. 4 iron-sword hits (3 crits). Skeleton horse traps (thunderstorm) = 4 armed skeletons: flee.
   Axe cannot be used by skeletons; shield-disable not a threat.
+  No shield, no cover, dist >= 4: every tactic's Pre fails and the section 5 fallback runs (D15: `hit_and_back_off`, i.e. a charge). This is accepted: standing still at 6-15 blocks is worse. The same holds for stray and bogged.
 ```
 
 ```yaml
@@ -473,6 +524,10 @@ tactics:
     when: dist_below: 4
   - name: shield_hold
     when: count_at_least: 2
+  - name: retreat_and_regen
+    when: hp_below: 10
+  - name: break_line_of_sight
+    when: always
 counter_gear: [shield, sword, armor, milk_bucket]
 do:
   - Same as skeleton. Slowness arrows make zig-zag and retreat slower: prefer the shield approach.
@@ -481,7 +536,7 @@ dont:
   - Do not commit to a long open-ground approach when slowed.
 flee_if: [hp_below: 8, slowed_and_hp_below: 12, count_at_least: 3]
 notes: >
-  Spawns in snowy biomes (snow plains, ice spikes, frozen oceans). Arrows apply Slowness I (about 30 s, verify). Burns in daylight (assumed, verify).
+  Spawns in snowy biomes (snow plains, ice spikes, frozen oceans). Arrows apply Slowness I (about 30 s; assumed value, no probe; behaviour does not depend on it). Burns in daylight (assumed, verify).
   4 iron-sword hits (3 crits). The slowness makes sprint_away unreliable: avoid being in the open.
 ```
 
@@ -506,6 +561,8 @@ tactics:
     when: dist_below: 4
   - name: retreat_and_regen
     when: poisoned_and_hp_below: 8
+  - name: break_line_of_sight
+    when: always
 counter_gear: [shield, sword, armor, milk_bucket]
 do:
   - Same as skeleton; poison arrows make every hit cost health over time (stops at 1 HP).
@@ -514,7 +571,7 @@ dont:
   - Do not stay at range 6-15 in the open without a shield.
 flee_if: [hp_below: 8, poisoned_and_hp_below: 8, count_at_least: 3]
 notes: >
-  Swamps and mangrove swamps; also trial chambers. Arrows apply Poison I (about 4-6 s, verify). Burns in daylight (assumed, verify).
+  Swamps and mangrove swamps; also trial chambers. Arrows apply Poison I (about 4-6 s; assumed value, no probe; behaviour does not depend on it). Burns in daylight (assumed, verify).
   16 HP: 3 iron-sword hits (2 crits). Dropped mushrooms; shearing is not a Phase 3 action.
 ```
 
@@ -566,16 +623,18 @@ danger: 6
 engage_policy: engage_if_blocking
 preferred_range_blocks: {min: 7, max: 16}
 tactics:
+  - name: shield_hold
+    when: mob_charged AND mob_aggroed_on_bot AND bot_has_shield AND dist_below: 4
+  - name: sprint_away
+    when: mob_charged AND mob_aggroed_on_bot
   - name: knockback_then_retreat
     when: mob_aggroed_on_bot AND not_mob_charged
   - name: avoid_path_around
-    when: not_mob_aggroed_on_bot OR mob_charged
-  - name: shield_hold
-    when: mob_hissing AND dist_below: 4 AND bot_has_shield
+    when: not_mob_aggroed_on_bot
 counter_gear: [shield, sword, armor]
 do:
   - If the creeper is not targeting the bot or blocking the objective, route around it at 7+ blocks.
-  - If it is blocking or chasing, use knockback_then_retreat: sprint-hit it once at 2.5-3 blocks, then back away to 7+ blocks within 20 ticks and wait for the hiss to stop, then repeat. Three or four cycles kill it.
+  - If it is blocking or chasing, use knockback_then_retreat: sprint-hit it once at 2.5-3 blocks, then back away to 7+ blocks within 24 ticks (otherwise shield_hold) and wait for the hiss to stop, then repeat. Three or four cycles kill it.
   - If a creeper is within 3 blocks and hissing, retreat at once; shield_hold only as a last resort.
   - While harvesting, a creeper within 8 blocks pauses the task; keep the shield raised while mining only if the creeper is within 8 blocks and aggroed.
 dont:
@@ -648,6 +707,10 @@ tactics:
     when: mob_aggroed_on_bot AND bot_has_shield AND dist_below: 4
   - name: retreat_and_regen
     when: hp_below: 12
+  - name: hit_and_back_off
+    when: mob_aggroed_on_bot AND dist_below: 4
+  - name: shield_hold
+    when: always
 counter_gear: [carved_pumpkin, shield, sword, armor]
 do:
   - Never look at its face. Do not call lookAtEntity on it while it is within 64 blocks and not aggroed. If a look target is needed, aim at the ground a block in front of the mob or at its feet (y below its eye line), or look at the feet position.
@@ -912,14 +975,14 @@ id: minecraft:vindicator
 phase: 5
 danger: 7
 engage_policy: avoid
-notes: Axe, 19/37 HP fighter; disables shields (axe). Mansion/raid member. Avoid; flee from groups.
+notes: 24 HP, axe damage 7 / 13 / 19 on Easy / Normal / Hard (verify). Disables shields (axe). Mansion/raid member. Avoid; flee from groups.
 ```
 ```yaml
-id: minecraft:evoker
+id: minecraft:evocation_illager
 phase: 5
 danger: 7
 engage_policy: avoid
-notes: Mansion/raid. Fangs and summons vex. Avoid; leave the area.
+notes: Mansion/raid (Java name "evoker"; the Bedrock id is evocation_illager, D19). Fangs (entity `minecraft:evocation_fang`) and summons vex. Avoid; leave the area.
 ```
 ```yaml
 id: minecraft:vex
@@ -975,7 +1038,7 @@ id: minecraft:wither_skeleton
 phase: 5
 danger: 7
 engage_policy: avoid
-notes: Nether fortress. Wither effect on hit; 3 ft tall. Avoid.
+notes: Nether fortress. Wither effect on hit; 3 ft tall. Avoid. Decision pending from Jaycob (ROADMAP Phase 3 says "skeleton family"); default = avoid, kept as a Phase 5 stub. It never spawns in the Overworld.
 ```
 ```yaml
 id: minecraft:wither
@@ -991,13 +1054,37 @@ danger: 10
 engage_policy: flee
 notes: Boss in the End. Flee; never enter The End in Phase 3.
 ```
+```yaml
+id: minecraft:parched
+phase: 5
+danger: 4
+engage_policy: avoid
+notes: Newer skeleton-family archer (id confirmed in @minecraft/vanilla-data 1.26.52; stats unknown, verify). Treat as a ranged mob: avoid, break line of sight.
+```
+```yaml
+id: minecraft:camel_husk
+phase: 5
+danger: 4
+engage_policy: avoid
+notes: Newer husk-family mob, usually mounted (id confirmed in vanilla-data 1.26.52; stats unknown, verify). Avoid.
+```
+```yaml
+id: minecraft:zombie_nautilus
+phase: 5
+danger: 4
+engage_policy: avoid
+notes: Newer undead water mob (id confirmed in vanilla-data 1.26.52; stats unknown, verify). Avoid; stay out of deep water.
+```
+
+Drift rule: every hostile entity id in `@minecraft/vanilla-data` (`mojang-entity.d.ts`) must appear in exactly one of: a section 3 or 4 entry, `NEVER_TARGET`, `NEUTRAL_UNTIL_PROVOKED`, `IGNORE`. A unit test `test/mobs-drift.test.ts` (S6 owns it) fails and prints the missing ids when one does not; an id in no list falls to the default entry (section 6) unseen otherwise.
 
 ---
 
 ## 5. TACTICS catalogue
 
 Common rules for every tactic:
-- A tactic runs only if its `Gear` and `Pre` hold. It aborts when any `Abort` holds, handing control back to the decision loop (which may pick `retreat_and_regen`).
+- **Selection:** walk the entry's `tactics` in order; take the first whose `when` is true AND whose `Gear` and `Pre` hold. A tactic runs only if its `Gear` and `Pre` hold. It aborts when any `Abort` holds, handing control back to the decision loop (which may pick `retreat_and_regen`).
+- **Fallback (D15):** if no tactic of the entry is eligible (every `when` false, or every eligible one fails `Gear`/`Pre`), the executor uses the first of: `hit_and_back_off` if melee is allowed (engage policy `engage` or `engage_if_blocking` with the mob attacking or blocking, a weapon or fists in hand, and `hit_and_back_off` `Gear`/`Pre` hold); else `avoid_path_around`; else `sprint_away`. Unarmed means fist damage 1 and the same tactics (D14).
 - `Interval` = minimum 10 ticks between attacks (Bedrock invulnerability window, verify).
 - Never attack if the line passes through a NEVER_TARGET hitbox.
 - All timings are ticks; all distances blocks, measured bot feet to mob feet unless stated.
@@ -1021,7 +1108,7 @@ Common rules for every tactic:
   1. Hold 2.5-3 blocks from the target.
   2. Circle sideways (alternate direction every 12-15 ticks) while facing the target.
   3. Attack when the target's reach is closed or just after it attacks; max once per 10 ticks.
-  4. If it closes to under 2 blocks, step back 1 block (5 ticks) then attack.
+  4. If it closes to under 2 blocks, step back about 1 block (4 ticks, one pump) then attack.
 - Abort: hp_below per entry; 3+ attackers (switch to shield_hold); target out of reach for 40 ticks (leash).
 
 ### hit_and_back_off
@@ -1029,7 +1116,7 @@ Common rules for every tactic:
 - Pre: target hits harder than the bot wants to trade (slimes, spiders, hordes), or knockback is useful.
 - Steps:
   1. Sprint-hit the target (knockback).
-  2. Immediately walk backwards 3 blocks for 10 ticks, keeping the target in front.
+  2. Immediately walk backwards 2 blocks in 10 ticks (4.3 b/s = 0.215 b/tick, so 10 ticks = 2.15 blocks), keeping the target in front.
   3. Wait until the target re-enters 3.5 blocks; if it does not within 40 ticks, abort.
   4. Repeat.
 - Abort: hp_below; terrain behind the bot has a drop within 3 blocks; stuck against a wall.
@@ -1060,8 +1147,8 @@ Common rules for every tactic:
 - Steps:
   1. Sprint to within 2.5 blocks of the creeper (approach from its side if possible).
   2. At tick 0 sprint-hit it (sprint knockback sends it back 2-3 blocks).
-  3. Ticks 1-20: back away to 7+ blocks (about 25 ticks at sprint speed; start immediately). Keep the creeper in view.
-  4. If the fuse started (hissing) the explosion occurs at tick 30 after ignition; the bot must be 7+ blocks away by then or the bot's distance must exceed 6 so the fuse winds down.
+  3. Ticks 1-24: back away to 7+ blocks (start immediately; sprint speed 5.6 b/s = 0.28 b/tick, so 24 ticks cover about 6.7 blocks plus the 2-3 blocks of knockback, i.e. 7+ blocks from the creeper). Keep the creeper in view. If the distance is still below 7 at tick 24, go to the Fallback (shield_hold).
+  4. If the fuse started (hissing) the explosion occurs at tick 30 after ignition; the bot's distance must exceed 6 before then so the fuse winds down (that is why the retreat budget is 24 ticks, 6 ticks of margin).
   5. When the creeper stops hissing and is within 7-9 blocks, repeat from step 1. Kill takes 3-4 cycles.
 - Abort: hp_below 12; the creeper becomes charged; the retreat path is blocked; a second hostile attacks.
 - Fallback: if retreat is impossible and it is within 3 and hissing, shield_hold facing the creeper and accept reduced damage.
@@ -1114,7 +1201,7 @@ Common rules for every tactic:
   1. Sprint away from the threats until out of line of sight and at least 16 blocks away (or past the leash), preferably toward home/owner.
   2. Stop sprinting once beyond 12 blocks of every hostile.
   3. Eat the highest-saturation food (per the food table) until hunger is full enough to regenerate (about 18 of 20); natural regen then runs.
-  4. Resume only when `hp_at_least` the central config's re-engage threshold and no hostile within 12 blocks.
+  4. Resume only when `hp_at_least: config.combat.recoverHp` (16 HP) and no hostile within `config.combat.countRadius` (12) blocks.
 - Abort: new hostile within 8 blocks and targeting the bot (switch to flee/escape logic).
 
 ### flee_sneak
@@ -1160,6 +1247,10 @@ Common rules for every tactic:
 
 Applies to any mob with the `monster` family not found in this table (mods, new versions) and not in NEVER_TARGET/IGNORE.
 
+A provoked `minecraft:wolf` and a provoked `minecraft:zombie_pigman` (zombified piglin; `zombie_pigman` is its Bedrock id, `@minecraft/vanilla-data`) use this default entry. This is intended in Phase 3. `test/mobs-golden.test.ts` gets one golden row for each (provoked wolf, provoked zombie_pigman: expect `engage_policy: avoid`, first tactic `shield_hold` when aggroed with a shield at under 4 blocks).
+
+The section 5 fallback (D15) applies to this entry too: if no tactic is eligible, `avoid_path_around` (the default entry is `avoid`, so melee is not allowed), else `sprint_away`.
+
 ```yaml
 id: default
 variants: []
@@ -1192,3 +1283,43 @@ dont:
 flee_if: [hp_below: 12, count_at_least: 2, hostile_count_at_least: 3]
 notes: Conservative defaults; replace with a real entry once the mob is added to this file.
 ```
+
+---
+
+## Revision log (review pass 1)
+
+Decisions applied: D15 (fallback, section 5 intro and section 6), D18 (spider: neutral only when `is_daylight` AND light >= 12; sections 2.2, 3 spider, 1.6), D19 (`minecraft:evocation_illager`).
+
+- MOBS--completeness#1: changed (D15 wins: fallback order is `hit_and_back_off` if melee allowed, else `avoid_path_around`, else `sprint_away`; the finding's `melee_strafe` / `sprint_away` order is not used; written in section 5 and section 6)
+- MOBS--completeness#2: applied (new section 1.6 atom-evaluation table; mob_size thresholds follow S2b 6.1: max HP primary, box width fallback 0.75/1.5)
+- MOBS--completeness#3: applied (OR in the section 1.5 grammar; the S3 union change is owned by S3's reviser and S3 already parses OR)
+- MOBS--completeness#4: applied (wither_skeleton stays a Phase 5 stub; "Decision pending from Jaycob; default = avoid" added)
+- MOBS--completeness#5: applied (D19; `evoker` entry renamed; S1 section 6.1 is another reviser's file)
+- MOBS--completeness#6: applied (stubs `parched`, `camel_husk`, `zombie_nautilus`; `sulfur_cube`, `nautilus` in 2.2; drift rule and test name `test/mobs-drift.test.ts` added, S6 owns the test; ids confirmed in vanilla-data 1.26.52)
+- MOBS--completeness#7: applied (section 6 note; golden rows for provoked wolf and zombie_pigman; Bedrock id is `zombie_pigman`, there is no `zombified_piglin` in vanilla-data)
+- MOBS--completeness#8: applied (counter_gear sentence in 1.2)
+- MOBS--consistency#1: applied (grammar rewritten in 1.5; the S3 l.321 note is S3's file)
+- MOBS--consistency#2: applied (`config.combat.recoverHp` = 16 in retreat_and_regen step 4)
+- MOBS--consistency#3: applied (`config.combat.countRadius` (12) in retreat_and_regen step 4)
+- MOBS--game-api#1: applied (D19)
+- MOBS--game-api#2: skipped (stale: the cave_spider `do` / `dont` / `notes` already describe a cave spider: 12 HP, 2 hits, mineshaft spawners; no zombie_villager text present). Cheap part applied: cobweb / spawner `dont` line added
+- MOBS--game-api#3: changed (spider neutrality wording now follows D18: `is_daylight` AND light >= 12, config `spiderNeutralLight`, probe P15; in 2.2, the spider entry `notes` and `do`)
+- MOBS--game-api#4: applied (drowned does not burn in daylight; verify once with the first drowned seen)
+- MOBS--game-api#5: applied (copper_golem, husk Hunger, stray Slowness, bogged Poison now "assumed value, no probe; behaviour does not depend on it"; header line 5 says these are not verify tags)
+- MOBS--logic#1: changed (cave_spider order: `retreat_and_regen` (poisoned < 8), `hit_and_back_off` (poisoned < 12), `melee_strafe` always; the 8 rule also moved above the 12 rule, otherwise it was shadowed)
+- MOBS--logic#2: applied (spider: `shield_hold` before `hit_and_back_off always`)
+- MOBS--logic#3: changed (creeper list: charged+aggroed+shield+<4 -> `shield_hold`; charged+aggroed -> `sprint_away`; aggroed+not charged -> `knockback_then_retreat`; not aggroed -> `avoid_path_around`; the unreachable hissing `shield_hold` row removed, its case is the `knockback_then_retreat` Fallback)
+- MOBS--logic#4: changed (enderman: `hit_and_back_off` when `mob_aggroed_on_bot AND dist_below: 4`, then `shield_hold always`; "provoked" is not an atom, aggroed is used)
+- MOBS--logic#5: applied (skeleton, stray: `retreat_and_regen hp_below: 10` then `break_line_of_sight always`; bogged: `break_line_of_sight always` after its existing retreat; note on the D15 charge when no cover exists)
+- MOBS--logic#6: applied (`not_mob_is_baby AND` on husk and zombie_villager `melee_crit`; husk also gets `melee_strafe` for babies and `shield_hold` moved before `hit_and_back_off count>=2`, which shadowed it)
+- MOBS--logic#7: applied (hit_and_back_off: 2 blocks in 10 ticks, arithmetic shown)
+- MOBS--logic#8: applied (creeper retreat budget 24 ticks, otherwise `shield_hold`; arithmetic shown)
+- MOBS--logic#9: skipped (the pillager `hp_below: 10` and bogged `poisoned_and_hp_below: 8` flee_if items are not redundant: the matching tactic rows come after earlier rows that shadow them, so flee_if is the only reliable trigger)
+- MOBS--precision#1: applied (grammar, same text as consistency#1)
+- MOBS--precision#2: changed (mob_size definition in 1.6 uses max HP first and the box second, to match S2b 6.1; box threshold 0.75 instead of 0.8)
+- MOBS--precision#3: applied (`config.combat.recoverHp`)
+- MOBS--precision#4: applied (transcription note: cave_spider and iron_golem are not copied to `NEUTRAL_UNTIL_PROVOKED_IDS`)
+- MOBS--precision#5: applied (`phase` type cell: 0, 3 or 5)
+- MOBS--precision#6: applied (vindicator: 24 HP, axe 7 / 13 / 19, verify)
+- MOBS--precision#7: applied (melee_strafe step 4: about 1 block, 4 ticks, one pump)
+- MOBS--precision#8: applied (config names `config.body.meleeReach`, `config.body.attackIntervalTicks`; no `MIN_ATTACK_INTERVAL_TICKS`)

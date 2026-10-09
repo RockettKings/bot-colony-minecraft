@@ -18,7 +18,7 @@ Transcription rules:
 | food gain rule | hunger = min(20, hunger + food.hunger); saturation = min(hunger_after, saturation + food.saturation) |
 | exhaustion threshold | exhaustion >= 4.0: subtract 4.0, then saturation -1 (min 0); if saturation already 0, hunger -1 |
 | regen, slow | hunger >= 18 and HP < max: +1 HP every 80 ticks (4 s), costs 6.0 exhaustion per HP |
-| regen, fast (saturation-boosted) | hunger >= 18 and saturation > 0 and HP < max: +1 HP every 10 ticks (0.5 s), costs 6.0 exhaustion per HP (verify: Java needs hunger = 20; Bedrock believed to need >= 18). Plan conservatively: assume fast regen only at hunger = 20 |
+| regen, fast (saturation-boosted) | hunger = 20 and saturation > 0 and HP < max: +1 HP every 10 ticks (0.5 s), costs 6.0 exhaustion per HP. Code this as `fast_regen_active = hunger === 20 && saturation > 0` (conservative; the Bedrock threshold of 18 is unverified) |
 | saturation -> HP conversion | 1 saturation = 4 exhaustion = about 0.67 HP of fast regen (6 exhaustion per HP). Use `hp_from_saturation = saturation * 0.67` |
 | no regen | hunger < 18: no natural regeneration |
 | starvation | hunger = 0: -1 HP every 80 ticks. Easy stops at 10 HP, Normal stops at 1 HP (half heart), Hard kills (verify) |
@@ -35,9 +35,9 @@ Transcription rules:
 | eat duration, dried_kelp | 16 ticks (0.8 s) |
 | eat duration, honey_bottle | 40 ticks (2.0 s) |
 | eat duration, potion/other drinkables | 32 ticks (not in FOOD table) |
-| always edible at full hunger | golden_apple, enchanted_golden_apple, chorus_fruit, honey_bottle (verify honey). All other foods cannot be eaten while hunger = 20 |
+| always edible at full hunger | golden_apple, enchanted_golden_apple, chorus_fruit. All other foods (including honey_bottle, D20) cannot be eaten while hunger = 20 |
 | eating can be interrupted by | switching held slot, stopping use, dying; damage does not cancel it (verify) |
-| hunger effect net values (use in starving ordering) | rotten_flesh: +4 hunger, +0.8 sat, -3.75 from effect (80% chance): net about +1. chicken: +2, +1.2, -3.75 (30% chance): net about 0 to -1. pufferfish: +1, +0.2, -5.6 (3 levels x 15 s): net strongly negative |
+| hunger effect net values (use in starving ordering) | expected net = food.hunger - chance * 3.75 * effect_level * (seconds / 30). rotten_flesh: +4 hunger, +0.8 sat, effect -3.75 at 80%: expected net +1.0 (4 - 0.8 * 3.75). chicken: +2, +1.2, effect -3.75 at 30%: expected net +0.875 (2 - 0.3 * 3.75; -1.75 when the effect triggers). pufferfish: +1, +0.2, effect -5.6 (3 levels x 15 s, 100%): expected net -4.6 (1 - 1.0 * 3.75 * 3 * 0.5). This is why `avoid_order` ranks rotten_flesh (+1.0) before chicken (+0.875) |
 
 Suggested decision inputs: `missing_hunger = 20 - hunger`; `can_sprint = hunger > 6`; `regen_active = hunger >= 18`.
 
@@ -46,9 +46,9 @@ Suggested decision inputs: `missing_hunger = 20 - hunger`; `can_sprint = hunger 
 ## SECTION 2. FOOD table
 
 Saturation column = **actual saturation points restored** (wiki value), not the modifier. Conversion used: saturation = hunger x modifier x 2 (e.g. cooked_beef 8 x 0.8 x 2 = 12.8).
-Effect format: `effect:level:seconds:chance_percent`, multiple effects separated by `;`. Level is 1-based (`regeneration:2` = Regeneration II). Effect names are Bedrock ids. Pseudo-effects: `teleport` (chorus fruit, random teleport up to about 8 blocks, verify), `cure_poison` (removes poison), `varies` (suspicious_stew, effect depends on the flower and is unknown to the bot).
+Effect format: `effect:level:seconds:chance_percent`, multiple effects separated by `;`. Level is 1-based (`regeneration:2` = Regeneration II). Effect names are Bedrock ids. Pseudo-effects: `teleport` (chorus fruit, random teleport up to about 8 blocks, verify), `cure_poison` (removes poison), `varies` (suspicious_stew, effect depends on the flower and is unknown to the bot). Pseudo-effects (`teleport`, `cure_poison`, `varies`) use `level` 1 or 0 and `seconds` 0 as placeholders; code must ignore level and seconds for them.
 `returns_item`: item left in inventory after eating (`bowl`, `glass_bottle`), else `-`.
-Tag assignment rules used (so new rows can be added consistently): `avoid` = explicit harmful list; `emergency` = golden apples; `escape` = chorus_fruit; `topup` = non-avoid, non-emergency, non-raw, non-stew, hunger <= 6 and saturation <= 7.2 (cheap); `main` = hunger >= 5 and saturation >= 4.8 and not avoid/emergency; `raw` = cookable raw food (potato included); `stew` = returns a bowl; `fast` = eat_ticks 16; `regen` = gives Regeneration.
+Tag assignment rules used (so new rows can be added consistently): `avoid` = explicit harmful list; `emergency` = golden apples; `escape` = chorus_fruit; `topup` = non-avoid, non-emergency, non-raw, non-stew, hunger <= 6 and saturation <= 7.2 (cheap); `main` = hunger >= 5 and saturation >= 4.8 and not avoid/emergency; `raw` = cookable raw food (potato included; raw chicken is NOT `raw`, it is `avoid` only, so it is never eaten outside `starving`); `stew` = returns a bowl; `fast` = eat_ticks 16; `regen` = gives Regeneration.
 Items that exist in the game but are deliberately NOT in the table: milk_bucket and potions (not food), cake and honey_block (placed blocks), golden_dandelion (animal feed, not edible by players; verify), any food added after 1.26.5 (verify).
 
 | id | hunger | saturation | eat_ticks | effects | returns_item | tags |
@@ -82,7 +82,7 @@ Items that exist in the game but are deliberately NOT in the table: milk_bucket 
 | minecraft:pumpkin_pie | 8 | 4.8 | 32 | - | - | main |
 | minecraft:rabbit_stew | 10 | 12 | 32 | - | bowl | main,stew |
 | minecraft:beef | 3 | 1.8 | 32 | - | - | raw |
-| minecraft:chicken | 2 | 1.2 | 32 | hunger:1:30:30 | - | avoid,raw |
+| minecraft:chicken | 2 | 1.2 | 32 | hunger:1:30:30 | - | avoid |
 | minecraft:cod | 2 | 0.4 | 32 | - | - | raw |
 | minecraft:mutton | 2 | 1.2 | 32 | - | - | raw |
 | minecraft:porkchop | 3 | 1.8 | 32 | - | - | raw |
@@ -94,14 +94,14 @@ Items that exist in the game but are deliberately NOT in the table: milk_bucket 
 | minecraft:sweet_berries | 2 | 0.4 | 32 | - | - | topup |
 | minecraft:tropical_fish | 1 | 0.2 | 32 | - | - | topup |
 
-Verify list for Section 2: Bedrock effect durations/chances of `poisonous_potato` (4 s vs 5 s), `spider_eye` (4 s vs 5 s), `pufferfish` (poison II 60 s vs 20 s), `enchanted_golden_apple` (Regeneration V 30 s on Bedrock vs Regeneration II 20 s on Java), `golden_apple` absorption duration, `honey_bottle` saturation and eat time, `chorus_fruit` teleport radius, raw cod id (`minecraft:cod`; legacy `minecraft:fish` was renamed).
+Verify list for Section 2: Bedrock effect durations/chances of `poisonous_potato` (4 s vs 5 s), `spider_eye` (4 s vs 5 s), `pufferfish` (poison II 60 s vs 20 s), `enchanted_golden_apple` (Regeneration V 30 s on Bedrock vs Regeneration II 20 s on Java), `golden_apple` absorption duration, `honey_bottle` saturation and eat time, `chorus_fruit` teleport radius, raw cod id (`minecraft:cod`; legacy `minecraft:fish` was renamed). Decided: honey_bottle is NOT always-edible (D20); it follows the normal hunger rules. Fallback when unprobed: treat poison/hunger durations and the chorus teleport radius as the table values; the ordering (pufferfish is never eaten unless starving, `hunger <= 2` and `hp >= 12`) does not depend on them.
 
 ---
 
 ## SECTION 3. Food selection rules (data)
 
 Definitions for every rule below:
-- `eligible(item)`: item is in FOOD, the bot holds >= 1, it is not part of the current task objective (do not eat the objective items, except in `emergency`), and `hunger < 20` unless the item is in `always_edible`.
+- `eligible(item)`: item is in FOOD, the bot holds >= 1, it is not part of the current task objective (do not eat the objective items, except in `emergency`), and `hunger < 20` unless the item is in `always_edible`. Two more exclusions: (1) an item tagged `avoid` is eligible only in the `starving` situation, through `avoid_order` (3.2), whatever its other tags; (2) reserved items (3.3) are eligible only in their named situation (`golden_carrot`: `pre_engage_heal` and `starving` only, so `topup` skips it even though it is tagged `main`; `golden_apple` and `enchanted_golden_apple`: `emergency`, or `starving` as the last choice; `chorus_fruit`: `escape_teleport`, or `starving` after `avoid`).
 - `missing = 20 - hunger`. `sat_after(item) = min(min(20, hunger + item.hunger), saturation + item.saturation)`. `sat_gain(item) = sat_after(item) - saturation`.
 - `item_value` = ITEM VALUE table (Section 4). Used only for tie-breaks (spend the cheapest item).
 - Final tie-break for every rule: shortest `eat_ticks`, then alphabetical id.
@@ -110,16 +110,16 @@ Definitions for every rule below:
 
 | situation | trigger (suggested defaults, config owns them) | ordered tag preference (first tag with an eligible item wins) | pick rule inside the winning tag |
 |---|---|---|---|
-| topup | no threat within 24 blocks AND hunger <= 17 AND missing >= 2 | topup, main, raw | `fit_largest`: among items with `item.hunger <= missing`, max `item.hunger`; tie lowest `item_value`. If no item fits, `fit_smallest_overflow`: smallest `item.hunger`, only if overflow `(item.hunger - missing) <= 2`; else eat nothing |
+| topup | no threat within 24 blocks AND hunger <= 17 AND missing >= 2 (at the default `topupHungerMax = 17` the `missing >= topupMinMissing (2)` test is always true; it only matters if `topupHungerMax` is raised to 18 or more) | topup, main, raw | `fit_largest`: among items with `item.hunger <= missing`, max `item.hunger`; tie lowest `item_value`. If no item fits, `fit_smallest_overflow`: smallest `item.hunger`, only if overflow `(item.hunger - missing) <= 2`; else eat nothing |
 | pre_engage_heal | about to engage or resume combat AND (hunger < 20 OR HP < max) AND time to contact >= eat_ticks + 20 | main, topup | `max_sat_gain`: max `sat_gain`; tie max `item.hunger`; tie lowest `item_value` |
 | emergency | HP <= 6 (3 hearts) AND hostile within 16 blocks (or HP <= 4 any threat) | emergency, then fall through to pre_engage_heal | `fixed_order`: `enchanted_golden_apple` > `golden_apple`. Allowed even at hunger = 20 |
 | starving | hunger <= 6 AND no eligible item in tags topup, main, raw  (or hunger = 0 and HP dropping) | topup, main, raw, stew, avoid, emergency | non-avoid tags: `fit_largest` ignoring `missing` limit (max hunger). `avoid`: `avoid_order` below. `emergency` only if HP <= 6 and nothing else |
-| escape_teleport | HP <= 6 AND melee threat within 3 blocks AND escape-rejoin is not available AND no non-chorus way out | escape | `fixed_order`: `chorus_fruit`. Never when in melee with eat_ticks not covered (see guard) |
+| escape_teleport | HP <= 6 AND melee threat within 3 blocks AND escape-rejoin is not available AND the bot holds no eligible item with tag `emergency` | escape | `fixed_order`: `chorus_fruit`. Never when in melee with eat_ticks not covered (see guard) |
 
 Guards (apply to every situation except where noted):
-- `eat_guard`: start eating only if no hostile is within `eat_ticks / 20 * threat_speed + 2` blocks (suggested threat_speed 5 blocks/s), otherwise retreat first. `emergency` and `escape_teleport` may start with the threat closer, but not while a melee mob is already within 2 blocks unless HP <= 4.
+- `eat_guard`: start eating only if no hostile is within `eat_ticks / 20 * threat_speed + 2` blocks (suggested threat_speed 5 blocks/s), otherwise retreat first. The comparison is `distance <= threshold` blocks eating: at equality the bot does not eat. Example: `32 / 20 * 5 + 2 = 10` blocks, so a zombie at exactly 10.0 blocks blocks a normal meal. At runtime the S2a `canEatSafely` rule (stricter, D23) replaces this threshold; this line is the data default. `emergency` and `escape_teleport` may start with the threat closer, but not while a melee mob is already within 2 blocks unless HP <= 4.
 - Poison guard: items with `poison` need HP >= 8 and no threat within 16 blocks (poison cannot kill but leaves 1 HP).
-- `always_edible`: golden_apple, enchanted_golden_apple, chorus_fruit, honey_bottle (verify honey).
+- `always_edible`: golden_apple, enchanted_golden_apple, chorus_fruit. `honey_bottle` is not always edible: it follows the normal hunger rules (cannot be eaten at hunger = 20; D20).
 - Return items: after eating a `stew`, `returns_item` bowl lands in inventory (junk value 0.1, do not treat as cargo loss).
 
 ### 3.2 avoid_order (starving only; first = eat first)
@@ -137,6 +137,7 @@ Guards (apply to every situation except where noted):
 
 `minecraft:rotten_flesh`, `minecraft:chicken`, `minecraft:spider_eye`, `minecraft:poisonous_potato`, `minecraft:pufferfish`, `minecraft:suspicious_stew`.
 Reserved items (only in the named situation, otherwise never eaten): `minecraft:golden_apple`, `minecraft:enchanted_golden_apple` -> emergency (or starving as the very last choice); `minecraft:chorus_fruit` -> escape_teleport (or starving as the very last choice, after avoid); `minecraft:golden_carrot` -> allowed in pre_engage_heal and starving only, never topup (valuable for brewing).
+Milk bucket and potions are not food. They have value rows in 4.6 (`milk_bucket` 13, `potion` 3) but no bot uses them in Phase 3.
 
 ### 3.4 Machine-readable copy
 
@@ -218,8 +219,7 @@ Reserved items (only in the named situation, otherwise never eaten): `minecraft:
   "alwaysEdible": [
     "minecraft:golden_apple",
     "minecraft:enchanted_golden_apple",
-    "minecraft:chorus_fruit",
-    "minecraft:honey_bottle"
+    "minecraft:chorus_fruit"
   ],
   "suggestedThresholds": {
     "topupHungerMax": 17,
@@ -247,26 +247,29 @@ Reserved items (only in the named situation, otherwise never eaten): `minecraft:
 - Stack value = `value_per_item * count * durability_factor * enchant_multiplier`.
 - Category `gear` set (counts toward gearValue, lost on death): `tool`, `weapon`, `armour`, `gear`. Everything else is cargo.
 
-### 4.2 Constants (put in config)
+### 4.2 Constants
 
-| name | value |
-|---|---|
-| OBJ_FULL | 1000 |
-| OTHER_CARGO_CAP | 900  (must stay below OBJ_FULL) |
-| ENCHANT_PER_LEVEL | 0.10 |
-| ENCHANT_MENDING_BONUS | 0.50 |
-| ENCHANT_MULT_CAP | 3.0 |
-| DURABILITY_FLOOR | 0.25 |
-| UNKNOWN_VALUE_STACKABLE | 1  (maxStackSize > 1) |
-| UNKNOWN_VALUE_UNSTACKABLE | 5  (maxStackSize = 1) |
-| FOOD_VALUE_PER_HUNGER | 0.25 |
-| FOOD_AVOID_VALUE | 0.1 |
-| ENCHANTED_BOOK_BASE | 20 |
-| ENCHANTED_BOOK_PER_LEVEL | 10  (mending +50 once) |
+Config keys live under `config.combat.<camelCase of the name>` (S2a section 9 owns them and may rename; B2 `values.ts` / S2a must read them from `config`, not from literals). The four rows marked "const" are plain `const`s inside `values.ts` behind `kb.value` (S2a), not config.
+
+| name | value | where |
+|---|---|---|
+| OBJ_FULL | 1000 | `config.combat.objFull` |
+| OTHER_CARGO_CAP | 900  (must stay below OBJ_FULL) | `config.combat.otherCargoCap` |
+| ENCHANT_PER_LEVEL | 0.10 | `config.combat.enchantPerLevel` |
+| ENCHANT_MENDING_BONUS | 0.50 | `config.combat.enchantMendingBonus` |
+| ENCHANT_MULT_CAP | 3.0 | `config.combat.enchantMultCap` |
+| DURABILITY_FLOOR | 0.25 | `config.combat.durabilityFloor` |
+| UNKNOWN_VALUE_STACKABLE | 1  (maxStackSize > 1) | const in `values.ts` |
+| UNKNOWN_VALUE_UNSTACKABLE | 5  (maxStackSize = 1) | const in `values.ts` |
+| FOOD_VALUE_PER_HUNGER | 0.25 | const in `values.ts` |
+| FOOD_AVOID_VALUE | 0.1 | const in `values.ts` |
+| ENCHANTED_BOOK_BASE | 20 | `config.combat.enchantedBookBase` |
+| ENCHANTED_BOOK_PER_LEVEL | 10 | `config.combat.enchantedBookPerLevel` |
+| ENCHANTED_BOOK_MENDING (mending +50 once) | 50 | `config.combat.enchantedBookMending` |
 
 ### 4.3 Modifier rules
 
-1. **Enchantments**: `enchant_multiplier = min(ENCHANT_MULT_CAP, 1 + ENCHANT_PER_LEVEL * sum(levels) + (ENCHANT_MENDING_BONUS if mending))`. Applies to tool, weapon, armour, shield, bow, crossbow, trident, elytra, mace, fishing_rod. Not to books (use `ENCHANTED_BOOK_BASE + ENCHANTED_BOOK_PER_LEVEL * sum(levels)`, plus 50 if mending).
+1. **Enchantments**: `enchant_multiplier = min(ENCHANT_MULT_CAP, 1 + ENCHANT_PER_LEVEL * sum(levels) + (ENCHANT_MENDING_BONUS if mending))`. `sum(levels)` excludes Mending's level; Mending contributes only `ENCHANT_MENDING_BONUS` (Protection IV + Unbreaking III + Mending: sum 7, multiplier `1 + 0.7 + 0.5 = 2.2`). Applies to tool, weapon, armour, shield, bow, crossbow, trident, elytra, mace, fishing_rod. Not to books (use `ENCHANTED_BOOK_BASE + ENCHANTED_BOOK_PER_LEVEL * sum(levels)`, plus 50 if mending).
 2. **Damaged gear**: `durability_factor = max(DURABILITY_FLOOR, (maxDurability - damage) / maxDurability)` for items with a durability component. Others: 1. A broken-looking item still keeps 25% (repair cost).
 3. **Unknown item** (no row matches): `UNKNOWN_VALUE_STACKABLE` or `UNKNOWN_VALUE_UNSTACKABLE`.
 4. **Food** not listed explicitly: `FOOD_VALUE_PER_HUNGER * food.hunger`, or `FOOD_AVOID_VALUE` if tagged `avoid`. Overrides in the table below win.
@@ -285,13 +288,17 @@ otherCargoValue   = min(OTHER_CARGO_CAP, otherCargoRaw)       // never exceeds 9
 cargoValue        = objectiveValue + otherCargoValue
 ```
 
+For tasks `goto`, `defend` and `idle` there are no objective items: `objectiveValue = 0` and the escape decision is made on gear and cargo value alone (Example 4 is this case; unit test `value-no-objective`).
+
 Guarantee: if `held >= requiredAmount` then `objectiveValue = 1000 > 900 >= otherCargoValue`, so full objective progress outranks any non-objective cargo. Partial progress is modest and linear. Objective items are NOT also counted in `otherCargoRaw` (no double count). Gear never goes into cargo (see 4.5).
 
 ### 4.5 DEATH COST (inputs only)
 
 ```
-gearValue   = sum over EQUIPPED slots (head, chest, legs, feet, offhand, mainhand) and INVENTORY stacks
+gearValue   = sum over EQUIPPED slots (head, chest, legs, feet, offhand) and INVENTORY stacks (all 36 slots, 0..35,
+              which include the held mainhand item exactly once)
               whose category is tool | weapon | armour | gear, of stackValue (enchant and durability applied)
+              // Never add `mainhand` separately: it aliases the selected hotbar slot.
 cargoValue  = objectiveValue + otherCargoValue          // from 4.4
 deathCost   = gearValue + cargoValue                    // what is lost if the bot dies and drops/loses everything
 ```
@@ -420,7 +427,7 @@ Columns: `id | value_per_item | category | notes`. Categories: ore, ingot, gem, 
 | minecraft:diamond_block | 360 | block_rare | 9 diamond |
 | minecraft:ancient_debris | 35 | ore | 1 debris smelts to 1 scrap |
 | minecraft:netherite_scrap | 30 | ingot |  |
-| minecraft:netherite_ingot | 150 | ingot | 4 scrap + 4 gold_ingot |
+| minecraft:netherite_ingot | 150 | ingot | design value (4 scrap + 4 gold_ingot = 144) |
 | minecraft:netherite_block | 1350 | block_rare | 9 netherite_ingot |
 | minecraft:obsidian | 2 | block_rare |  |
 | minecraft:crying_obsidian | 4 | block_rare |  |
@@ -471,10 +478,12 @@ Columns: `id | value_per_item | category | notes`. Categories: ore, ingot, gem, 
 | minecraft:enchanted_book | 20 | misc | base value; add 10 per enchant level via rule 4.3.1 (mending +50) |
 | minecraft:book | 1 | misc |  |
 | minecraft:wind_charge | 1 | weapon |  |
-| minecraft:golden_apple | 45 | food | emergency food; 8 gold ingots |
+| minecraft:golden_apple | 45 | food | emergency food; design value (8 gold ingots = 48) |
 | minecraft:enchanted_golden_apple | 250 | food | cannot be crafted, loot only |
 | minecraft:golden_carrot | 8 | food |  |
 | minecraft:honey_bottle | 1.5 | food |  |
+| minecraft:milk_bucket | 13 | tool | not food; bucket 12 + milk; unused in Phase 3 |
+| minecraft:potion | 3 | misc | not food; any potion; unused in Phase 3 |
 | minecraft:shield | 6 | gear | 6 planks + 1 iron |
 | minecraft:bow | 3 | weapon |  |
 | minecraft:crossbow | 8 | weapon |  |
@@ -573,7 +582,7 @@ Pattern rows (apply after exact rows, in this order):
 | `minecraft:*_spawn_egg`, `minecraft:*_banner_pattern`, `minecraft:music_disc_*` | 20 | misc | rare novelties |
 | any FOOD id not above | `0.25 x hunger`, or 0.1 if tagged `avoid` | food | rule 4.3.4 |
 
-Verify list for Section 4: existence and ids of copper tools/armour and spears in 1.26 (rows marked); ancient debris and netherite chain; Bedrock ids `quartz_ore`, `ender_eye`, `mangrove_propagule`; every numeric value is a design choice, not a game fact.
+Verify list for Section 4: existence and ids of copper tools/armour and spears in 1.26 (rows marked); ancient debris and netherite chain; Bedrock ids `quartz_ore`, `ender_eye`, `mangrove_propagule`; every numeric value is a design choice, not a game fact. Decision: keep every row marked `(verify exists)`; an id that does not exist in the game is never matched, so a stale row is harmless.
 
 ---
 
@@ -589,10 +598,10 @@ State: hunger 14, saturation 2, HP 20/20, inventory 5 `bread`, 2 `cooked_beef`, 
 ### Example 2: same bot, HP 6, zombies 10 blocks away
 State: hunger 14, saturation 2, HP 6/20, 3 zombies at 10 blocks.
 - HP <= 6 and hostile within 16 -> situation `emergency`.
-- Eat guard: contact in about 10 / 5 = 2 s = 40 ticks, eat_ticks = 32, so the apple finishes before contact (margin 8 ticks; emergency may start with a smaller margin than the normal 20).
+- Eat guard: the normal guard threshold is `32 / 20 * 5 + 2 = 10` blocks; the zombies are at 10 blocks and the comparison is `distance <= threshold` (equality blocks), so a normal meal is blocked. `emergency` may start with a closer threat: contact in about 10 / 5 = 2 s = 40 ticks, eat_ticks = 32, so the apple finishes before contact (margin 8 ticks; emergency may start with a smaller margin than the normal 20). No melee mob is within 2 blocks, so the emergency exception applies.
 - `fixed_order`: enchanted_golden_apple (not held), golden_apple (held). **Eat `minecraft:golden_apple`** (Regeneration II 5 s, Absorption I 120 s).
-- After the threat is handled or if there are 2+ s of space: `pre_engage_heal` picks by sat_gain: cooked_beef (hunger 20, saturation min(20, 2+12.8) = 14.8, gain 12.8) beats bread (gain 6). So the next meal is `cooked_beef`.
-- If HP were 12 instead (not emergency): pre_engage_heal directly picks `cooked_beef`.
+- After the apple is eaten the state is hunger min(20, 14+4) = 18, saturation min(18, 2+9.6) = 11.6. After the threat is handled or if there are 2+ s of space: `pre_engage_heal` picks by sat_gain from that state: cooked_beef (`sat_after = min(min(20, 18+8), 11.6+12.8) = min(20, 24.4) = 20`, gain 20 - 11.6 = 8.4) beats bread (`sat_after = min(min(20, 18+5), 11.6+6) = 17.6`, gain 6.0). So the next meal is `cooked_beef`.
+- If HP were 12 instead (not emergency): pre_engage_heal directly picks `cooked_beef` from the original state (hunger 14, saturation 2): cooked_beef `sat_after = min(20, 2+12.8) = 14.8`, gain 12.8; bread `min(19, 2+6) = 8`, gain 6.
 
 ### Example 3: starving
 State: hunger 3, HP 14, inventory: 3 `rotten_flesh`, 1 `spider_eye`, 2 `chicken`, 1 `pufferfish`. No safe food.

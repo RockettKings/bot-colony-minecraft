@@ -58,7 +58,7 @@ export type EatStatus = "idle" | "eating" | "done" | "interrupted" | "failed";
 export interface EnchantView { id: string; level: number } // id WITHOUT "minecraft:" e.g. "sharpness"
 
 /** Armour + offhand as plain data. Never includes Mainhand (it aliases the selected hotbar slot). */
-export interface EquipmentView {
+export interface EquippedStacks {
   head?: ItemStackView;
   chest?: ItemStackView;
   legs?: ItemStackView;
@@ -70,6 +70,7 @@ export interface BodySelfState {
   pos: Vec3;            // feet
   eye: Vec3;            // Entity.getHeadLocation()
   vel: Vec3;            // Entity.getVelocity(); vel.y < 0 and !onGround = falling
+  facing: { x: number; z: number }; // unit XZ of getViewDirection(); { x: 1, z: 0 } if unreadable
   onGround: boolean;
   inWater: boolean;
   sneaking: boolean;
@@ -77,7 +78,7 @@ export interface BodySelfState {
   hp: number;
   maxHp: number;
   hunger: number;       // player.hunger currentValue; 20 if the component is unreadable
-  saturation: number;   // 0 if unreadable
+  saturation: number | undefined; // undefined if unreadable (hunger still defaults to 20)
   selectedSlot: number; // hotbar index 0..8
 }
 
@@ -102,7 +103,7 @@ export interface BodyReads {
   self(): BodySelfState | undefined;
   /** Any entity by id (world.getEntity wrapped; invalid ids give undefined). */
   entity(id: string): BodyEntityState | undefined;
-  equipment(): EquipmentView | undefined;
+  equipment(): EquippedStacks | undefined;
   /** Current engine tick (system.currentTick). */
   tick(): Tick;
 }
@@ -163,8 +164,7 @@ export interface BodyActions {
   setSneaking(on: boolean): boolean;
   /** One dropSelectedItem() call for the item in `slot` (§1.3). Returns the number of items that left the bot (0 = failed). */
   dropSlot(slot: number): number;
-  /** Bot line in chat: world.sendMessage(`<${name}> ${text}`), truncated to 200 chars. */
-  chat(text: string): void;
+  // No chat method (D24): the body never speaks. Bot-voiced text is a typed `botNotice` rendered by the core (S5 §6).
 }
 
 /** What the combat layer receives for one bot: Phase 2 worker + Phase 3 body. selectSlot has one signature in both. */
@@ -203,8 +203,7 @@ export function initBodyEvents(): void;
 | `stopBreaking()` | `p.stopBreakingBlock()` | §C G:961 | Idempotent. |
 | `setSneaking(on)` | `p.isSneaking = on` then read back | §C S:9541 | Probe P6 (if not writable → `config.body.sneakEnabled=false`, see §6). |
 | `dropSlot(slot)` | select a hotbar slot holding the stack, `p.dropSelectedItem()` | §C G:611 | §1.3. |
-| `chat(text)` | `world.sendMessage(`<${name}> ${text}`)` | §C "Chat" row and Safe rule: **not** `p.chat` | `p.chat` probably goes through chat events and could be parsed as a `!` command. |
-| `self()` | `p.location`, `getHeadLocation()`, `getVelocity()`, `isOnGround`, `isInWater`, `isSneaking`, `isSprinting`, health `currentValue/effectiveMax`, `player.hunger/saturation` `currentValue`, `selectedSlotIndex` | §A3, §A4, §A11 | Each component read in its own `try`; a failed hunger read gives `hunger = 20`, `saturation = 0`. Only `pos`, `eye`, `hp` failing returns `undefined`. |
+| `self()` | `p.location`, `getHeadLocation()`, `getVelocity()`, `getViewDirection()`, `isOnGround`, `isInWater`, `isSneaking`, `isSprinting`, health `currentValue/effectiveMax`, `player.hunger/saturation` `currentValue`, `selectedSlotIndex` | §A3, §A4, §A11 | Each component read in its own `try`; a failed hunger read gives `hunger = 20`; a failed saturation read gives `saturation = undefined`. `facing` = normalised XZ of `p.getViewDirection()` (`{x: 1, z: 0}` on a throw or a zero vector). Only `pos`, `eye`, `hp` failing returns `undefined`. |
 | `entity(id)` | `world.getEntity(id)` (throws for bad ids → `undefined`), then `isValid`, `location`, `getHeadLocation()`, `getVelocity()`, `getAABB()`, `isOnGround`, `isInWater`, `hasComponent('minecraft:is_baby'/'is_charged'/'is_ignited'/'is_tamed')`, `getComponent('minecraft:tameable')?.isTamed` | §A2, §A4, §A6, §A7, §H | |
 | `equipment()` | `getComponent('minecraft:equippable')` + `getEquipment(Head/Chest/Legs/Feet/Offhand)` → `stackView` (durability and `enchants` added) | §D3 | |
 | `tick()` | `system.currentTick` | §H | |
@@ -222,12 +221,12 @@ Per-bot state in the closure: `lastAttackTick = -1000`. Steps, first failing ste
    - `q2` = `box.center`.
    - For each `q`: if `dist(eye,q) < 0.05` the ray is clear; else `hit = dim.getBlockFromRay(eye, unit(q−eye), { maxDistance: dist(eye,q) − 0.05, ... })`; clear if `hit === undefined`.
    - LOS = `q1 clear OR q2 clear`. Neither → `"no_los"`.
-7. **Friendly in the line:** `dim.getEntitiesFromRay(eye, unit(q−eye), { maxDistance: dist(eye,q), ignoreBlockCollision: true })` for the clear `q`; if any hit with `distance < dist(eye,q) − 0.3` has a never-target typeId or is tamed → `"no_los"` (MOBS §2.1 "never hit through a friendly"). A throw here is ignored (treated as no friendly).
+7. **Friendly in the line (D29):** `hits = dim.getEntitiesFromRay(eye, unit(q−eye), { maxDistance: dist(eye,q), ignoreBlockCollision: true })` for the clear `q`. The ray starts inside the bot's own body, so **first drop every hit with `hit.entity.id === p.id` and every hit with `hit.distance <= 0.3`** (this is what keeps the bot from reporting `no_los` on every attack). Of the remaining hits, if any has `hit.distance < dist(eye,q) − 0.3` and its entity has a never-target typeId or is tamed → `"no_los"` (MOBS §2.1 "never hit through a friendly"). Other non-friendly entities in front do not block. A throw here is ignored (treated as no friendly). Unit test: a fake ray result whose first hit is the bot itself still yields `"hit"`.
 8. `p.stopBreakingBlock()` (safe rule 10; ignore throws). The weapon is selected by the caller (`EquipmentManager.ensureWeaponSelected()`), never here.
 9. `ok = p.attackEntity(target)`. `true` → `lastAttackTick = now`, return `"hit"`. `false` → return `"cooldown"` (the API says false = on cooldown or no valid target; the engine decided). A throw → log, `"invalid"`.
 10. The method never changes the bot's facing, never calls `lookAt*` (keeps the enderman rule safe).
 
-Effective attack spacing: runners are stepped every 4 ticks, so the real minimum spacing is `ceil(10/4)*4 = 12` ticks. This is intended (Bedrock has no attack cooldown but a target is invulnerable to equal damage ~10 ticks; MOBS §1.1, verify via probe P3 which may change `attackIntervalTicks`).
+Effective attack spacing: runners are stepped every 4 ticks, so the real minimum spacing is `ceil(10/4)*4 = 12` ticks. This is intended (Bedrock has no attack cooldown but a target is invulnerable to equal damage ~10 ticks; MOBS §1.1, verify via probe P3 which may change `attackIntervalTicks`). Within that window a stronger hit still deals the difference (e.g. a crit after a normal hit); this is not modelled and the spacing stays 12 ticks.
 
 ### 1.3 Other adapter algorithms
 
@@ -240,7 +239,7 @@ Effective attack spacing: runners are stepped every 4 ticks, so the real minimum
 2. If `slot >= 9`: `scratch = config.body.dropScratchSlot (8)`; `c.swapItems(slot, scratch, c)` (engine swap, conserving) and remember to swap back. Else `scratch = slot`.
 3. `prev = p.selectedSlotIndex`; `p.selectedSlotIndex = scratch`; `ok = p.dropSelectedItem()`; `p.selectedSlotIndex = prev`.
 4. If a swap was made: `c.swapItems(slot, scratch, c)` again (the scratch slot's original item returns). 
-5. Return `before − (c.getItem(slot)?.amount ?? 0)` if `ok` and the same typeId remains/empties; else 0. Dropped items can be picked up again by the bot after ~40 ticks; the caller must move ≥ 3 blocks away (conservation holds either way).
+5. Return 0 if `ok` is false or the slot now holds a different typeId than `s0.typeId`. Otherwise return `before − after`, where `after = c.getItem(slot)?.amount ?? 0` (an empty slot counts as 0). Dropped items can be picked up again by the bot after ~40 ticks; the caller must move ≥ 3 blocks away (conservation holds either way).
 
 **`unequip(from)`** and **`equipFromSlot`** use §1.5.
 
@@ -328,6 +327,7 @@ export type Difficulty = "easy" | "normal" | "hard";                 // Peaceful
 export type MoveSpeed = "slow" | "normal" | "fast";
 export type EngagePolicy = "engage" | "engage_if_blocking" | "avoid" | "flee";
 export type CounterGear = "shield" | "sword" | "axe" | "armor" | "carved_pumpkin" | "food" | "milk_bucket" | "water_bucket" | "blocks" | "none";
+export type MobSize = "small" | "medium" | "large";
 export type Special =
   | "burns_in_daylight" | "breaks_doors_hard" | "inflicts_hunger" | "poison" | "slowness" | "weakness" | "explodes"
   | "teleports" | "gaze_aggro" | "water_vulnerable" | "ranged_projectile" | "throws_potions" | "self_heals"
@@ -350,6 +350,8 @@ export interface MobEntry {
   attack_range_blocks: number;
   move_speed: MoveSpeed;
   special: Special[];
+  /** Optional. Source for `mob_size_*`. Absent -> `SIZE_FALLBACK[id] ?? "medium"` (table below). */
+  size?: MobSize;
   danger: number;                                   // 0..10
   engage_policy: EngagePolicy;
   preferred_range_blocks: { min: number; max: number };
@@ -382,6 +384,16 @@ export interface MobKnowledge {
   neutralUntilProvoked: NeutralEntry[];              // MOBS §2.2
   ignore: string[];                                  // MOBS §2.3
 }
+```
+
+**Size atoms.** `mob_size_small|medium|large` evaluate `size(target)` = `MobView.isBaby ? "small" : (entry.size ?? SIZE_FALLBACK[typeId] ?? "medium")`, with this fixed table in `core/combat/mobs.ts` (the YAML needs no new key; a YAML `size:` key, if a MOBS author adds one, overrides it):
+
+```ts
+export const SIZE_FALLBACK: Readonly<Record<string, MobSize>> = {
+  "minecraft:silverfish": "small", "minecraft:endermite": "small", "minecraft:cave_spider": "small", "minecraft:bat": "small",
+  "minecraft:ravager": "large", "minecraft:hoglin": "large", "minecraft:zoglin": "large", "minecraft:warden": "large",
+  "minecraft:ghast": "large", "minecraft:wither": "large", "minecraft:ender_dragon": "large",
+};   // every other id -> "medium" (zombie, skeleton, creeper, spider, witch, pillager, drowned, husk, stray, ...)
 ```
 
 **Lookup order** (pure function `lookupMob(kb, typeId): MobEntry`, B2): `entries[typeId]` → `entries[variantIndex[typeId]]` → `stubToEntry(stubs[typeId])` → `kb.default`. `neverTarget`/`ignore` are checked by S1 before lookup.
@@ -425,21 +437,23 @@ export interface MobView {
   flying: boolean;         // entry.special includes "flying"
 }
 // hissing = state.ignited === true
-//        || (config.body.hissProxyEnabled && typeId === "minecraft:creeper" && distance < config.body.hissProxyDist)
+//        || (config.combat.hissProxyEnabled && typeId === "minecraft:creeper" && distance < config.combat.hissProxyDist)
+// (single source of the proxy keys is config.combat, S2b; S3 §7 does not define them)
 
 /** Numbers a tactic needs that are not geometry. Built by B3 from the Percept each pump. */
 export interface TacticSignals {
-  hostileCount12: number;          // all threat-classified mobs within 12 blocks
-  sameTypeCount12: number;         // of the target's typeId
+  hostileCountNear: number;        // all threat-classified mobs within config.combat.countRadius (12) blocks
+  sameTypeCount12: number;         // of the target's typeId, same radius
   shieldDurabilityPct: number | undefined;   // 0..100; undefined = no shield
   shieldDisabled: boolean;         // bot_shield_disabled (S1; false when unknown)
   poisoned: boolean;
   slowed: boolean;
   darkness: boolean;               // Darkness effect active (warden alarm)
   canRegen: boolean;               // hunger >= 18 OR the bot holds an eligible food
-  reengageHp: number;              // config.combat re-engage threshold (S2)
-  fleeHp: number;                  // first `hp_below: N` in entry.flee_if, else config.body.fleeDefaultHp (8)
+  reengageHp: number;              // = config.combat.recoverHp (S1 §10, 16 HP)
+  fleeHp: number;                  // `n` of the first element of entry.flee_if that is a top-level { kind: "num", atom: "hp_below" }; else cfg.fleeDefaultHp (8)
   hitDamage: number;               // entry.attack_damage[difficulty]
+  unarmed: boolean;                // D14: no usable weapon (EquipmentManager.report().hasWeapon === false); fist damage 1, same tactics
 }
 
 export interface NoGoZone { center: Vec3; radius: number; expiresAt: Tick; mobId: string }
@@ -458,10 +472,13 @@ export interface TacticContext {
   signals(): TacticSignals;
   /** Tick of the last entityHitEntity where `mobId` hit the bot (S1 events); undefined = none/unknown. */
   mobAttackedAt(mobId: string): Tick | undefined;
+  /** D14 leash (S1 §7.4): distance from `pos` to the nearest objective point of the frozen ObjectiveContext; undefined = no objective points. */
+  leashDistance(pos: Vec3): number | undefined;
+  leashBlocks: number;                       // config.combat.leashBlocks (16)
   home: Vec3 | undefined;
   owner: Vec3 | undefined;                   // nearest owner position, if online
   isNeverTarget(typeId: string): boolean;    // B2 lists
-  publishNoGo(zone: NoGoZone): void;         // avoid_path_around only
+  publishNoGo(zone: NoGoZone): void;         // avoid_path_around only; the controller only stores it (see §3.3.13)
   equip: { ensureWeaponSelected(): boolean };   // EquipmentManager facade
   /** S2's food chooser for retreat_and_regen (situation "pre_engage_heal"); undefined = nothing eligible. */
   chooseFood(): { slot: number; typeId: string; eatTicks: number } | undefined;
@@ -478,6 +495,8 @@ export interface TacticRunner {
   readonly hits: number;
   /** false = the Pre conditions fail; nothing was done and `reason` is set. Idempotent per instance: call once. */
   start(ctx: TacticContext): boolean;
+  /** Optional hook called by P0 step 2 when the target vanished (rush_kill uses it to set `handoff`). */
+  onTargetGone?(): void;
   /** Called once per pump. Never throws. After "done"/"failed" it must not be stepped again. */
   step(now: Tick): TacticStatus;
   /** Idempotent. Always: stopMoving(), setSprinting(false), lowerShield(), setSneaking(false), stopEating(). */
@@ -497,14 +516,17 @@ Notation used in every table. `t` = the target `MobView` (re-read each pump with
 - `canSprint` = `S.hunger >= cfg.sprintMinHunger (7)`.
 - `tryAttack()` = `r = body.attackTarget(t.id)`; `"hit"` → `lastAttackAt = now`, `hits++`; returns `r`.
 - `HANDOFF(x)` = set `handoff = x` before returning.
-- `FAIL(code)` = set `reason = code`, return `"failed"`; `DONE(code)` = set `reason = code`, return `"done"`.
+- `FAIL(code)` = set `reason = code`, return `"failed"`; `DONE(code)` = set `reason = code`, return `"done"`. **Inside `start()`, `FAIL(code)` means: set `reason = code`; return `false`.**
+- `minD` = minimum `distance` over `ctx.threats()`; `Infinity` if the list is empty. (`threats()` only covers 24 blocks, so `minD >= 24` is also true for "nothing within 24".)
+- `W` (weapon pre-check, D14) = call `ctx.equip.ensureWeaponSelected()` and **ignore the result**. `false` means unarmed: the tactic still starts and runs unchanged with fist damage 1 (`signals.unarmed`); the equipment manager has already raised or will raise `equipNeed weapon` (§5.4). Tactics never refuse for lack of a weapon.
 
 **Prologue P0** (every `step(now)`, before the phase table, in this order):
 1. `S = body.self()`; undefined → `FAIL("self_unreadable")`.
-2. If the tactic has a target: `t = ctx.mob(targetId)`; undefined, or the entity is invalid/dead → `body.stopMoving()`, `DONE("target_gone")`.
+2. If the tactic has a target: `t = ctx.mob(targetId)`; undefined, or the entity is invalid/dead → `body.stopMoving()`; call the optional hook `onTargetGone()` (rush_kill sets `handoff = "retreat_and_regen"` there if `signals.poisoned || signals.slowed`); `DONE("target_gone")`.
 3. If `ctx.isNeverTarget(t.typeId)` → `FAIL("never_target")` (a bug upstream; log it).
-4. The tactic's **Abort** list (rows below, evaluated top to bottom; `signals()` read once per pump).
-5. `total > cfg.tacticTimeoutTicks (600)` unless the table gives its own cap → `FAIL("timeout")`.
+4. **Leash (D14, S1 §7.4 L1/L2).** Applies to every tactic with a target **except the L3-exempt ones: `retreat_and_regen`, `flee_sneak`, `avoid_path_around`, `sprint_away`, `take_cover_overhead`.** `ld = ctx.leashDistance(t.pos)`; if `ld !== undefined && ld > ctx.leashBlocks && t.distance > 3.5` → `body.stopMoving()`, `FAIL("leash")`. (The `t.distance > 3.5` clause is S1 L1: a mob that is already on top of the bot stays fightable.) Scan-chosen destinations (`findCover`, `findLowCeiling`) must also satisfy the leash: runners pass `accept = (c) => { const d = ctx.leashDistance(c); return d === undefined || d <= ctx.leashBlocks; }` to the scan (L2).
+5. The tactic's **Abort** list (rows below, evaluated top to bottom; `signals()` read once per pump).
+6. `total > cfg.tacticTimeoutTicks (600)` → `FAIL("timeout")`, **unless the tactic section has an `Own cap:` line**; then P0 step 6 does not apply and only that cap does. Own caps: `retreat_and_regen` 1800 (`cfg.retreatTotalCapTicks`), `take_cover_overhead` 1500, `shield_advance_zigzag` 400, `break_line_of_sight` 400, `flee_sneak` 600, `sprint_away` 400. Every other tactic uses the default 600.
 
 **Start guard P1** (every `start(ctx)`): `body.stopBreaking()`; `body.stopEating()`; if `body.isEating()` still true → return false (`reason = "eating"`).
 
@@ -523,21 +545,23 @@ export function rayBlocked(world: WorldPort, a: Vec3, b: Vec3, step?: number, un
 export function standable(world: WorldPort, cell: Vec3): boolean;
 /** true if any solid block exists within `depth` cells below `cell`. */
 export function hasGround(world: WorldPort, cell: Vec3, depth: number): boolean;
-/** true if any of the 16 cells at Chebyshev distance 1 and 2 around `pos` (same y) has no ground within `depth`
- *  (a drop). Used as the "do not fight next to a drop" rule. */
+/** true if any cell with Chebyshev distance 1..`radius` from `pos` (same y) has no solid block within `depth` cells below
+ *  (a drop). For radius 2 that is 8 + 16 = 24 cells. Used as the "do not fight next to a drop" rule. */
 export function dropNear(world: WorldPort, pos: Vec3, radius: number, depth: number): boolean;
 /** true if the cells from `from` along unit direction `dir` for `len` blocks (step 1) are each standable, allowing
  *  ±1 vertical step. Returns the number of consecutive good blocks (0..len). */
+/** true if some block at (cell.x, cell.y + k, cell.z), k = 2..6, is solid. Used by swoop_counter, take_cover_overhead and findRoof. */
+export function roofed(world: WorldPort, cell: Vec3): boolean;
 export function freeRun(world: WorldPort, from: Vec3, dir: { x: number; z: number }, len: number): number;
 ```
 Cell = integer block coords (`Math.floor`). A "cell centre" = `x+0.5, y, z+0.5`. Every function that reads blocks counts calls against an optional `budget: { left: number }` argument; when `left` hits 0 it stops and returns its best partial result (scans below).
 
 **Scans** (`body/scan.ts`, pure, each with its own budget `cfg.scanBlockBudget` blockAt calls; each returns `undefined` when nothing valid is found within the budget; all ring loops go ring `r = 1..radius` (Chebyshev around the bot's block), and inside a ring iterate `x` ascending then `z` ascending, so results are deterministic):
 
-1. `findCover(world, shooterEye, bot, radius = cfg.coverSearchRadius (8), budget)` → `{ stand: Vec3; coverBlock: Vec3 } | undefined`. For every column `(x, z)` in the ring: cover candidate if blocks `(x, y0, z)` and `(x, y0+1, z)` are both solid (`y0` = bot's feet y). `u` = unitXZ(shooter → column centre). `stand` = cell of `(columnCentre + u)` at `y0`. Valid if `standable(stand)` AND `rayBlocked(shooterEye, stand + (0.5, 1.62, 0.5))` AND `rayBlocked(shooterEye, stand + (0.5, 0.3, 0.5))`. Finish the whole ring, pick the candidate with the smallest `dist3(bot, stand)`, tie smaller x then z. A ring with a valid candidate ends the search.
-2. `findLowCeiling(world, bot, threatPos, radius = cfg.ceilingSearchRadius (8), budget)` → `{ stand: Vec3; openDir: {x,z}; depth: 2|3 } | undefined`. Two passes: pass A requires depth 3, pass B depth 2. A cell `P` (at `y0`) is valid if: `standable(P)`; the block at `(P.x, y0+2, P.z)` is solid (ceiling exactly 2 above the feet); at least one orthogonal neighbour has solid blocks at both `y0` and `y0+1` (back covered); and no "tall cell" within Chebyshev radius `depth − 1`, where a tall cell has the three cells `y0, y0+1, y0+2` all non-solid (the enderman needs about 3 blocks, MOBS §5). Pick by smallest `dist3(bot, P)`, tie smaller x then z. `openDir` = unitXZ(P → nearest tall cell within Chebyshev radius 4; if none, toward `threatPos`).
-3. `findRoof(world, bot, radius = cfg.roofSearchRadius (10), budget)` → `Vec3 | undefined`. A cell `P` is roofed if `standable(P)` and some block at `(P.x, y0+k, P.z)`, `k = 2..6`, is solid. Valid if `P` and all 8 neighbours at the same y are roofed ("deep" roof). Nearest ring wins, then smallest `dist3`, then x, z.
-4. `pickFleeDirection(world, bot, threats, minRun = 6)` → `{ waypoint: Vec3; freeLen: number } | undefined`. 12 bearings (every 30°, bearing 0 = +x). `away` = normalized `Σ (bot − threat.pos) / max(dist², 1)` over `threats` (if the sum is zero use `+x`). For each bearing `dir`: `freeLen = freeRun(world, bot, dir, 24)`; skip if `< minRun`. `score = freeLen/24 + 1.5 * dot(dir, away)`. Highest score wins, tie lowest bearing index. `waypoint = bot + dir * min(freeLen, 12)` (y = bot.y). `undefined` = boxed in.
+1. `findCover(world, shooterEye, bot, radius = cfg.coverSearchRadius (8), budget, accept?)` → `{ stand: Vec3; coverBlock: Vec3 } | undefined`. For every column `(x, z)` in the ring: cover candidate if blocks `(x, y0, z)` and `(x, y0+1, z)` are both solid (`y0` = bot's feet y). `u` = unitXZ(shooter → column centre). `stand` = cell of `(columnCentre + u)` at `y0`. Valid if `standable(stand)` AND `accept?.(stand) !== false` AND `rayBlocked(shooterEye, stand + (0.5, 1.62, 0.5))` AND `rayBlocked(shooterEye, stand + (0.5, 0.3, 0.5))`. Finish the whole ring, pick the candidate with the smallest `dist3(bot, stand)`, tie smaller x then z. A ring with a valid candidate ends the search.
+2. `findLowCeiling(world, bot, threatPos, radius = cfg.ceilingSearchRadius (8), budget, accept?)` → `{ stand: Vec3; openDir: {x,z}; depth: 2|3 } | undefined`. Two passes: pass A requires depth 3, pass B depth 2. A cell `P` (at `y0`) is valid if: `standable(P)`; `accept?.(P) !== false`; the block at `(P.x, y0+2, P.z)` is solid (ceiling exactly 2 above the feet); at least one orthogonal neighbour has solid blocks at both `y0` and `y0+1` (back covered); and no "tall cell" within Chebyshev radius `depth − 1`, where a tall cell has the three cells `y0, y0+1, y0+2` all non-solid (the enderman needs about 3 blocks, MOBS §5). Pick by smallest `dist3(bot, P)`, tie smaller x then z. `openDir` = unitXZ(P → nearest tall cell within Chebyshev radius 4; if none, toward `threatPos`).
+3. `findRoof(world, bot, radius = cfg.roofSearchRadius (10), budget)` → `Vec3 | undefined`. A cell `P` is roofed if `standable(P)` and `roofed(world, P)`. Valid if `P` and all 8 neighbours at the same y are roofed ("deep" roof). Nearest ring wins, then smallest `dist3`, then x, z.
+4. `pickFleeDirection(world, bot, threats, minRun = 6)` → `{ waypoint: Vec3; freeLen: number } | undefined`. 12 bearings: bearing `i` has `dir = (cos(30°·i), sin(30°·i))` in (x, z), `i = 0..11` (bearing 0 = +x; the rotation sense only has to be fixed). `away` = normalized `Σ (bot − threat.pos) / max(dist², 1)` over `threats` (if the sum is zero use `+x`). For each bearing `dir`: `freeLen = freeRun(world, bot, dir, 24)`; skip if `< minRun`. `score = freeLen/24 + 1.5 * dot(dir, away)`. Highest score wins, tie lowest bearing index. `waypoint = bot + dir * min(freeLen, 12)` (y = bot.y). `undefined` = boxed in.
 
 Cost guard: a scan stops when `budget.left <= 0` and returns the best partial result found so far.
 
@@ -547,91 +571,94 @@ Conventions in the tables: every action listed in "Each pump" runs in the order 
 
 #### 3.3.1 `melee_crit`
 
-Gear/Pre (checked in `start`): a weapon is selected (`ctx.equip.ensureWeaponSelected()` true); `hostileCount12 <= 2`; ground flat: `|t.pos.y − S.pos.y| <= 1` and `!dropNear(world, S.pos, cfg.edgeCheckRadius (2), cfg.edgeDepth (3))` (a drop behind or beside the bot makes airborne knockback deadly: `FAIL("unsafe_ground")`); no block within 3 cells above the bot's feet that is solid (`cfg.critMinCeiling` 3). Otherwise `start` returns false.
-Mode `PLAIN_ONLY`: if `t.flying` (phantom), or `!cfg.critEnabled`, or only the ceiling pre-check fails, the runner skips APPROACH/JUMP/AIR/LAND and uses phase PLAIN only.
-Abort: `S.hp < signals.fleeHp`; any `ctx.threats()` entry with `ranged && hasLos && distance > 6`; `D >= 6`; `hostileCount12 >= 3`.
-Own cap: none besides `cfg.tacticNoProgressTicks (120)` without any `hit` → `FAIL("no_progress")`.
+Pre (checked in `start`): `W` (weapon pre-check, §3.2; never refuses). `start` returns false (`reason` = `too_many_hostiles`, `unsafe_ground`) if `hostileCountNear > 2`, or the flat-ground check fails: `|t.pos.y − S.pos.y| <= 1` and `!dropNear(world, S.pos, cfg.edgeCheckRadius (2), cfg.edgeDepth (3))` (a drop behind or beside the bot makes airborne knockback deadly → `unsafe_ground`). A failed ceiling check (a solid block within `cfg.critMinCeiling` (3) cells above the bot's feet) does **NOT** refuse: it selects PLAIN_ONLY.
+Mode `PLAIN_ONLY`: if `t.flying` (phantom), or `!cfg.critEnabled`, or the ceiling check failed, the runner skips APPROACH/JUMP/AIR/LAND and uses phase PLAIN only.
+Abort: `S.hp < signals.fleeHp`; any `ctx.threats()` entry with `ranged && hasLos && distance > 6`; `D >= 6`; `hostileCountNear >= 3`.
+No own cap (the default 600 of P0 step 6 applies). Extra rule: `cfg.tacticNoProgressTicks (120)` ticks without any `hit` → `FAIL("no_progress")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | APPROACH | `start`, or from LAND when `D > 3.5` | `setSprinting(canSprint)`; `moveToward(t.pos, 1.0)` | `D <= 3.5` and `S.onGround` | JUMP |
 | JUMP | `D <= 3.5`, on ground (age 0) | `setSprinting(false)`; `stopMoving()`; `jumped = body.jump()`; if true `jumpAt = now` | `jumped` true | AIR |
 | JUMP (retry) | `jump()` false | next pump repeats; after 2 failed pumps | | PLAIN |
-| AIR | after JUMP | **age < 8:** only `lookAt`. **age >= 8:** if `!S.onGround && S.vel.y < 0` (falling edge; expected at tick 8, since the apex is about tick 6): if `inReach` → `tryAttack()`; then → LAND whatever the result. If `S.onGround` at age 8: `tryAttack()` if `inReach && ready` (the jump did nothing) → LAND. If `S.vel.y >= 0` at age 8: wait one more pump. | attacked, or `age >= 16` | LAND |
+| AIR | after JUMP | `airAge` counts from the **first pump where `S.onGround === false`** after the JUMP (`airStartedAt = now` then; the jump command can take up to 3 ticks to leave the ground). Until then: only `lookAt` (if still `S.onGround` at `now − jumpAt >= 8`, the jump did nothing: `tryAttack()` if `inReach && ready` → LAND). **`airAge < 4`:** only `lookAt`. **`airAge >= 4`:** if `!S.onGround && S.vel.y < 0` (falling edge, about tick 8 after the command; the apex is about tick 6): if `inReach` → `tryAttack()`; then → LAND whatever the result. If `S.vel.y >= 0`: wait one more pump. | attacked, or `airAge >= 12` | LAND |
 | LAND | after AIR | `lookAt`. If `!S.onGround`: wait (if still airborne at age 24 → `FAIL("no_landing")`). On the ground: if `!t.ranged && D < 2.5`: `strafe(dir, 1.0)` for this pump, `dir` alternates every cycle (starts "left"), next pump `stopMoving()` | `S.onGround` | `D > 3.5` → APPROACH; else JUMP (cadence: `now − lastAttackAt >= 4`, which always holds because the attack was at the previous AIR pump) |
 | PLAIN | `PLAIN_ONLY` mode, or jumps failed | `setSprinting(false)`; if `!inReach`: `moveToward(t.pos, 1.0)`; else `stopMoving()`; if `inReach && ready`: `tryAttack()`; for a flying target also require `t.pos.y <= S.eye.y + 1` | target gone / abort | stays |
 
-Timing summary (normal cycle): tick 0 jump, tick 4 no action, tick 8 attack (crit window 7–11), tick 12 landed, tick 12 jump again, next attack at tick 20: spacing 12 ticks.
+Timing summary (normal cycle): tick 0 jump, tick 4 airborne detected (`airStartedAt`), tick 8 attack (`airAge` 4; crit window 7–11), tick 12 landed, tick 12 jump again, next attack at tick 20: spacing 12 ticks.
 
 #### 3.3.2 `melee_strafe`
 
-Pre: `D <= 6` (else `start` returns false, `reason="target_far"`); weapon selected.
-Abort: `signals.hostileCount12 >= 3` and `ctx.entry` counts toward `count_at_least: 3` → `HANDOFF("shield_hold")`, `FAIL("three_attackers")`; `S.hp < fleeHp`; leash: `R > cfg.meleeReach` continuously for 40 ticks (`outOfReachSince`) → `FAIL("leash")`.
-State: `dir` ("left" first), `dirUntil`, `cycle` (0), `lastBackstepAt`.
+Pre: `D <= 6` (else `start` returns false, `reason="target_far"`); `W`.
+Abort: `signals.hostileCountNear >= 3` → `HANDOFF("shield_hold")`, `FAIL("three_attackers")`; `S.hp < fleeHp`; `outOfReachSince` is set only in phase CIRCLE/BACKSTEP when `R > cfg.meleeReach` and cleared when `R <= cfg.meleeReach`; `now − outOfReachSince >= 40` → `FAIL("lost_contact")` (ENGAGE is excluded: the bot is still walking in). `cfg.tacticNoProgressTicks (120)` ticks without a `hit` → `FAIL("no_progress")`.
+State: `dir` ("left" first), `dirUntil`, `cycle` (0), `lastBackstepAt`, `outOfReachSince` (undefined).
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | ENGAGE | `start` | `setSprinting(canSprint && D > 4.5)`; if `D > 3.0`: `moveToward(t.pos, 1.0)` else `stopMoving()` | `D <= 3.0` | CIRCLE (`setSprinting(false)`, `dir="left"`, `dirUntil = now + 12`) |
 | CIRCLE | from ENGAGE/BACKSTEP | if `D < 2.0` → BACKSTEP (no other action). Else if `D > 3.4`: `moveToward(t.pos, 1.0)` (close the gap). Else `strafe(dir, 1.0)`. If `now >= dirUntil`: flip `dir`, `cycle++`, `dirUntil = now + (cycle % 2 === 0 ? 12 : 16)`. **Attack:** if `inReach && ready && (mobJustAttacked || D > entry.attack_range_blocks + 0.3)` then `tryAttack()`, where `mobJustAttacked = ctx.mobAttackedAt(t.id) !== undefined && now − that <= 8` | target gone / abort | stays |
-| BACKSTEP | `D < 2.0` | pump 0: `setSprinting(false)`; `backOff(t.pos, 1.0)` (4 ticks, about 0.9 block). Pump 1 (age >= 4): `stopMoving()`; if `inReach && ready` `tryAttack()` | `age >= 4` | CIRCLE |
+| BACKSTEP | `D < 2.0` | pump 0: `setSprinting(false)`; `backOff(t.pos, 1.0)` (4 ticks, about 0.9 block). Pump 1 (age >= 4): `stopMoving()`; if `inReach && ready` `tryAttack()`. At `age >= 4` run the pump-1 actions first, then transition. | `age >= 4` | CIRCLE |
 
 #### 3.3.3 `hit_and_back_off`
 
-Pre: weapon selected; `!dropNear(world, S.pos, 2, 3)`.
-Abort: `S.hp < fleeHp`; during BACKOFF the cell 1 block behind (opposite to `t`) has no ground within 3 or is solid → `FAIL("terrain_behind")`; no movement progress for 8 ticks while backing (`distXZ` change < 0.2) → `FAIL("stuck")`.
+Pre: `W`; `!dropNear(world, S.pos, 2, 3)` (else `FAIL("unsafe_ground")`).
+Abort: `S.hp < fleeHp`; during BACKOFF `behind = floor(S.pos − unitXZ(S.pos, t.pos))` (the cell 1 block behind, opposite to `t`): `!hasGround(world, behind, 3)` or the block at `behind` or `behind + (0,1,0)` is solid → `FAIL("terrain_behind")`; no movement progress for 8 ticks while backing (`distXZ` change < 0.2) → `FAIL("stuck")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | APPROACH | `start` / WAIT hit | `setSprinting(canSprint)`; `moveToward(t.pos, 1.0)` | `inReach` | HIT |
-| HIT | `inReach` | `setSprinting(canSprint)` (sprint-hit knockback); if `ready`: `r = tryAttack()`; | `r === "hit"` | BACKOFF (`backFrom = S.pos`) |
+| HIT | `inReach` | `setSprinting(canSprint)` (sprint-hit knockback; unverified extra distance, see P3; the tactic works without it); if `ready`: `r = tryAttack()`; | `r === "hit"` | BACKOFF (`backFrom = S.pos`) |
 | HIT (retry) | `r` is `"cooldown"`/`"out_of_reach"`/`"no_los"` | repeat next pump; after 8 pumps without a hit | | `FAIL("no_hit")` |
-| BACKOFF | after a hit | `setSprinting(false)`; `lookAt(t.id)`; `backOff(t.pos, 1.0)` | `dist3(S.pos, backFrom) >= 3.0` or `age >= 12` | WAIT (`stopMoving()`) |
+| BACKOFF | after a hit | `setSprinting(false)`; `lookAt(t.id)`; `backOff(t.pos, 1.0)` | `dist3(S.pos, backFrom) >= 3.0` or `age >= 16` (16 ticks at about 0.215 blocks/tick cover 3.4 blocks) | WAIT (`stopMoving()`) |
 | WAIT | after BACKOFF | `lookAt`; no movement | `D <= 3.5` | HIT (if `inReach`) else APPROACH; if `age >= 40` → `FAIL("mob_not_closing")` |
 
 #### 3.3.4 `rush_kill`
 
-Pre: `D <= 12`; `S.hp >= 12`; `signals.hostileCount12 === 1`; weapon selected.
-Abort: `signals.poisoned && S.hp < 8`; `signals.slowed && S.hp < 12`; `signals.hostileCount12 >= 2`; `S.hp < 8`.
-Cap: SPRINT phase `age > 60` without reaching `inReach` → `FAIL("no_contact")`.
+Pre: `D <= 12`; `S.hp >= cfg.rushMinHp (12)`; `signals.hostileCountNear === 1`; `W`.
+Abort: `signals.poisoned && S.hp < cfg.rushAbortHp (8)`; `signals.slowed && S.hp < cfg.rushMinHp (12)`; `signals.hostileCountNear >= 2`; `S.hp < cfg.rushAbortHp (8)`.
+State: `sprintTicks` = accumulated ticks spent in SPRINT (never reset). Cap: `sprintTicks > 60` and not `inReach` → `FAIL("no_contact")`.
+Target gone: handled by P0 step 2 → `onTargetGone()` sets `handoff = "retreat_and_regen"` if `signals.poisoned || signals.slowed`, then `DONE("target_gone")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | SPRINT | `start` | `setSprinting(canSprint)`; `moveToward(t.pos, 1.0)` (a straight line, no zigzag) | `inReach` | STRIKE |
-| STRIKE | `inReach` | `setSprinting(false)`. If the target is on the same level (`|t.pos.y − S.pos.y| <= 1`) run the **melee_crit cycle** (JUMP / AIR / LAND rows of §3.3.1 sharing the same state machine; implement it once as `CritCycle` in `melee.ts`); else plain: `if (!inReach) moveToward(t.pos, 1.0) else stopMoving(); if (inReach && ready) tryAttack()`. If `R > 4` for 2 pumps (it ran away, e.g. drank speed): back to SPRINT without resetting its 60-tick cap | target gone | on `done`: if `signals.poisoned \|\| signals.slowed` → `HANDOFF("retreat_and_regen")`; `DONE("killed")` |
+| STRIKE | `inReach` | `setSprinting(false)`. If the target is on the same level (`|t.pos.y − S.pos.y| <= 1`) run the **melee_crit cycle** (JUMP / AIR / LAND rows of §3.3.1 sharing the same state machine; implement it once as `CritCycle` in `melee.ts`); else plain: `if (!inReach) moveToward(t.pos, 1.0) else stopMoving(); if (inReach && ready) tryAttack()`. If `R > 4` for 2 pumps (it ran away, e.g. drank speed): back to SPRINT (`sprintTicks` keeps accumulating, so the 60-tick cap still holds) | `R > 4` for 2 pumps | SPRINT |
 
 #### 3.3.5 `knockback_then_retreat` (creeper)
 
-Pre (`start`): `!t.charged`; `signals.hostileCount12 === 1`; weapon selected; open retreat: `pickFleeDirection(world, S.pos, [t], 7)` returns a result (7+ free blocks) else `FAIL("no_retreat_space")`. (A 1-wide tunnel/closed room has no 7-block run away from the creeper; MOBS §3 creeper DON'T.)
-Abort: `t.charged`; `S.hp < 12`; `signals.hostileCount12 >= 2`; retreat blocked (no distance gain for 8 ticks while RETREAT, creeper `D < 3`): if `body.canBlock() && t.hissing` → `HANDOFF("shield_hold")`; `FAIL("retreat_blocked")`; `cycles >= cfg.creeperMaxCycles (6)` → `FAIL("too_many_cycles")`.
-State: `cycles`, `hissStartAt` (set the first pump `t.hissing` is true, cleared when false), `retreatDir`, `retreatPoint`.
+Pre (`start`): `!t.charged`; `signals.hostileCountNear === 1`; `W`; open retreat: `pickFleeDirection(world, S.pos, [t], 7)` returns a result (7+ free blocks) else `FAIL("no_retreat_space")`. (A 1-wide tunnel/closed room has no 7-block run away from the creeper; MOBS §3 creeper DON'T.)
+Abort: `t.charged`; `S.hp < cfg.creeperAbortHp (12)`; `signals.hostileCountNear >= 2`; retreat blocked (no distance gain for 8 ticks while RETREAT, creeper `D < 3`): if `body.canBlock() && t.hissing` → `HANDOFF("shield_hold")`; `FAIL("retreat_blocked")`; `cycles >= cfg.creeperMaxCycles (6)` → `FAIL("too_many_cycles")`.
+State: `cycles`, `retreatDir`, `retreatPoint`.
 Hard rule evaluated before the table every pump: if `t.hissing && D < 5` and phase is APPROACH/HIT → jump straight to RETREAT.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | APPROACH | `start` / cycle restart | `lookAt(t.id)`; `setSprinting(canSprint)`; `moveToward(t.pos, 1.0)` | `D <= 2.5` (tick 0 of the cycle) | HIT |
-| HIT | `D <= 2.5` or `inReach` | `setSprinting(canSprint)` (must be sprinting for the knockback); `r = tryAttack()` | `r === "hit"` | RETREAT |
+| HIT | `D <= 2.5` or `inReach` | `setSprinting(canSprint)` (sprinting is wanted for extra knockback, unverified: if probe P3 shows none the tactic still runs and only loses distance, no FAIL); `r = tryAttack()` | `r === "hit"` | RETREAT |
 | HIT (retry) | `r !== "hit"` | next pump again (`"cooldown"`/`"out_of_reach"`); after 5 pumps → `FAIL("no_hit")` | | |
-| RETREAT | after the hit (age 0) | At age 0 compute `retreatPoint = pickFleeDirection(world, S.pos, [t], 7).waypoint` (extended to `S.pos + dir*9`). `setSprinting(canSprint)`; `moveToward(retreatPoint, 1.0, true)` (faces the run direction; you cannot sprint backwards). Re-issue every pump. | `dist3(S.pos, t.pos) >= cfg.creeperRetreatDist (7)` (plan: about 25 ticks) or `age >= 40` | WAIT_FUSE (`stopMoving()`; `setSprinting(false)`; `cycles++`) |
-| WAIT_FUSE | arrived | `lookAt(t.id)`; no movement. Explosion deadline `hissStartAt + 30`; if `t.hissing && D < 6` and `now < hissStartAt + 22` keep distance: `backOff(t.pos, 1.0)` one pump. | `!t.hissing && D <= 9` | APPROACH (new cycle) |
+| RETREAT | after the hit (age 0) | At age 0 compute `retreatPoint = pickFleeDirection(world, S.pos, [t], 7).waypoint` (extended to `S.pos + dir*9`). `setSprinting(canSprint)`; `moveToward(retreatPoint, 1.0, true)` (faces the run direction; you cannot sprint backwards). Re-issue every pump. | `dist3(S.pos, t.pos) >= cfg.creeperRetreatDist (6)` (plan: 6 blocks within 40 ticks at 0.215 to 0.28 blocks/tick) or `age >= 40` | WAIT_FUSE (`stopMoving()`; `setSprinting(false)`; `cycles++`) |
+| WAIT_FUSE | arrived | `lookAt(t.id)`. If `t.hissing && D < 7`: `setSprinting(canSprint)`; `moveToward(retreatPoint, 1.0, true)` (keep running) until `!t.hissing` or `D >= 7`. Else `stopMoving()`; `setSprinting(false)`. | `!t.hissing && D <= 9` | APPROACH (new cycle) |
 | WAIT_FUSE (far) | `D > 9` | wait; if `age >= 60` and the creeper is not coming → `DONE("creeper_left")` | | |
 
-Timing of one cycle: tick 0 sprint-hit (knockback 2–3 blocks), ticks 0–25 sprint away to 7+ blocks, fuse (if started) explodes at ignition + 30 so the bot is 7+ blocks away by tick 25; typical kill is 3–4 cycles.
+Timing of one cycle: tick 0 sprint-hit (knockback about 1–3 blocks, unverified), ticks 0–40 sprint away to 6+ blocks (the retreat point is 7+ blocks of free run), the fuse (if started) explodes at ignition + 30 ticks, so the bot keeps running while `t.hissing && D < 7`; typical kill is 3–4 cycles.
 
 #### 3.3.6 `low_ceiling_fight` (enderman)
 
-Pre (`start`): `t.aggroed`; weapon selected; `findLowCeiling(...)` returns a spot, else `FAIL("no_ceiling")`. Never `lookAt` the mob's head (adapter guard; this tactic additionally only looks at floor points, see MOVE/HOLD).
+Pre (`start`): `t.aggroed`; `W`; `findLowCeiling(..., accept)` (leash filter, §3.2 P0 step 4) returns a spot, else `FAIL("no_ceiling")`. Never `lookAt` the mob's head (adapter guard; this tactic additionally only looks at floor points, see MOVE/HOLD).
 Abort: `signals.sameTypeCount12 >= 2` (second enderman); `S.hp < fleeHp`; `S.hp <= 2 * signals.hitDamage && D <= 3` → `FAIL("burst_risk")`; in HOLD, the mob is gone (`!ctx.mob`) for 100 ticks → `DONE("mob_gone")`.
+State: `lastStrikeAt = startedAt` (set in `start`; updated on every `tryAttack()` call); `dirToStand = unitXZ(S.pos, stand)`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | MOVE | `start` | `lookAt(floorAhead)` where `floorAhead = {x: S.pos.x + 1.0*dirToStand.x, y: S.pos.y, z: S.pos.z + 1.0*dirToStand.z}` (pitch down about 58°); `setSprinting(canSprint)`; `navigateToward(stand, 1.0)` (if it returns `undefined` or `pathLength === 0` after 2 tries: `moveToward(stand, 1.0, false)`) | `distXZ(S.pos, stand) <= 0.7` | HOLD |
-| HOLD | at the stand cell | `setSprinting(false)`; `stopMoving()`; `lookAt({x: stand.x + 2*openDir.x, y: S.pos.y, z: stand.z + 2*openDir.z})` (the floor toward the opening, never the mob); `raiseShield()` if `canBlock()`. **Strike:** if `inReach && t.hasLos && ready && (mobAttackedAt within 12 ticks \|\| age since last strike >= 20)`: `lowerShield()`; `tryAttack()`; the next pump `raiseShield()` again | mob gone / abort | stays |
+| HOLD | at the stand cell | `setSprinting(false)`; `stopMoving()`; `lookAt({x: stand.x + 2*openDir.x, y: S.pos.y, z: stand.z + 2*openDir.z})` (the floor toward the opening, never the mob); `raiseShield()` if `canBlock()`. **Strike:** if `inReach && t.hasLos && ready && (mobAttackedAt within 12 ticks \|\| now − lastStrikeAt >= 20)`: `lowerShield()`; `tryAttack()`; the next pump `raiseShield()` again | mob gone / abort | stays |
 | HOLD (reach lost) | `R > 3.0` for 40 ticks | no action (it cannot enter); if `R > 3.0` for 120 ticks | | `DONE("no_contact")` |
 
 #### 3.3.7 `shield_hold`
 
-Pre (`start`): `body.canBlock()`; a weapon selected; `!dropNear(world, S.pos, 2, 3)` (else `FAIL("no_cover_back")`).
-Abort: `signals.shieldDurabilityPct !== undefined && < 10`; `signals.shieldDisabled`; `S.hp < fleeHp`; `!signals.canRegen && S.hp < fleeHp + 4`. No threat within 16 for 40 ticks → `DONE("threat_gone")`.
+Pre (`start`): `body.canBlock()` (else `FAIL("no_shield")`); `W`; `!dropNear(world, S.pos, 2, 3)` (else `FAIL("no_cover_back")`).
+State: `lastStrikeAt = startedAt` (set in `start`; updated on every strike).
+Abort: `signals.shieldDurabilityPct !== undefined && < cfg.shieldMinDurabilityPct (10)`; `signals.shieldDisabled`; `S.hp < fleeHp`; `!signals.canRegen && S.hp < fleeHp + 4`. No threat within 16 for 40 ticks → `DONE("threat_gone")`.
 Primary selection each pump (`pickShieldTarget`): among `ctx.threats()` with `distance <= 16` and `hasLos`: first a hissing creeper; else a `ranged` mob with `distance <= 15`; else the smallest `distance`; tie lowest `id`. If `targetId` is set and still valid and a hissing creeper or ranged mob is not present, keep `targetId`.
 
 | Phase | Entry | Each pump | Exit | Next |
@@ -644,35 +671,37 @@ More than one attacker: the shield faces the strongest (`pickShieldTarget`), the
 
 #### 3.3.8 `shield_advance_zigzag` (skeleton family, pillager)
 
-Pre: `body.canBlock()` with `signals.shieldDurabilityPct >= 20`; `t.hasLos`; `6 <= D <= 15`; `freeRun(world, S.pos, unitXZ(S.pos, t.pos), min(D,15)) >= D − 1` (clear ground toward it); weapon selected.
-Abort: `shieldDurabilityPct < 10`; `S.hp < 8`; `ctx.threats().filter(m => m.ranged && m.hasLos).length > 2` → `HANDOFF("break_line_of_sight")`, `FAIL("too_many_shooters")`; a non-ranged threat with `distance < 8` whose bearing differs from the bot's facing by more than 90° → `FAIL("flank")`; `t.hasLos === false` for 60 ticks → `FAIL("lost_shooter")`; `total > 400` → `FAIL("timeout")`.
+Pre: `body.canBlock()` with `signals.shieldDurabilityPct >= cfg.zigzagMinDurabilityPct (20)`; `t.hasLos`; `6 <= D <= 15`; `freeRun(world, S.pos, unitXZ(S.pos, t.pos), min(D,15)) >= D − 1` (clear ground toward it); `W`.
+Own cap: `total > 400` → `FAIL("timeout")`.
+State: `swingSign = +1` (flips every 8 ticks in DASH); `perp(S->t) = rotateXZ(unitXZ(S.pos, t.pos), 90)`.
+Abort: `shieldDurabilityPct < cfg.shieldMinDurabilityPct (10)`; `S.hp < cfg.zigzagAbortHp (8)`; `ctx.threats().filter(m => m.ranged && m.hasLos).length > 2` → `HANDOFF("break_line_of_sight")`, `FAIL("too_many_shooters")`; a non-ranged threat with `distance < 8` whose bearing differs from the bot's facing by more than 90° → `FAIL("flank")`; `t.hasLos === false` for 60 ticks → `FAIL("lost_shooter")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | RAISE | `start` | `setSprinting(false)`; `stopMoving()`; `lookAt(t.id)`; `raiseShield()` | `shieldState() === "up"` | ADVANCE (`nextSidestepAt = now + 20`, `sideDir="left"`) |
 | ADVANCE | shield up, `D > 6` | `lookAt(t.id)`; `raiseShield()`; `moveToward(t.pos, 1.0, false)` (sneak speed applies; the bot keeps facing the shooter). When `now >= nextSidestepAt` → SIDESTEP | `D <= 6` | DASH |
 | SIDESTEP | every 20 ticks | `lookAt`; `raiseShield()`; `strafe(sideDir, 1.0)` for `cfg.zigzagSidestepPumps (4)` pumps (16 ticks, about 1 block at sneak speed); then `stopMoving()`, flip `sideDir`, `nextSidestepAt = now + 20` | 4 pumps elapsed | ADVANCE |
-| DASH | `D <= 6` | `lowerShield()` once; `setSprinting(canSprint)`; zigzag: `swingSign` flips every 8 ticks (2 pumps); `moveToward(t.pos + perp(S→t) * (2.0 * swingSign), 1.0)`; `lookAt(t.id)` | `D <= 3.5` | `HANDOFF("melee_strafe")`, `DONE("closed")` |
+| DASH | `D <= 6` | `lowerShield()` once; `setSprinting(canSprint)`; zigzag: `swingSign` flips every 8 ticks (2 pumps); `moveToward(t.pos + perp(S->t) * (2.0 * swingSign), 1.0)`; `lookAt(t.id)` | `D <= 3.5` | `HANDOFF("melee_strafe")`, `DONE("closed")` |
 
 Rate estimate: 20 ticks of advance gains about 1.3 blocks at sneak speed (1.3 b/s), plus 16 ticks of sidestep; going from 15 to 6 blocks takes about 7 cycles (about 250 ticks). Accepted (MOBS design).
 
 #### 3.3.9 `swoop_counter` (phantom)
 
-Pre: `body.canBlock()`; `ctx.mob` within 16; the bot is outside (`!roofed(S.pos)`: a solid block within 6 above the head → `FAIL("under_roof")`); weapon selected.
-Abort: `signals.hostileCount12 >= 3` or `S.hp < 10` → `HANDOFF("take_cover_overhead")`, `FAIL("too_many_or_hurt")`; `signals.shieldDurabilityPct < 10`; the phantom `D > 16` for 200 ticks → `DONE("left")`.
+Pre: `body.canBlock()`; `ctx.mob` within 16; the bot is outside (`roofed(world, S.pos)` true, i.e. a solid block 2..6 above the feet → `FAIL("under_roof")`); `W`.
+Abort: `signals.hostileCountNear >= 3` or `S.hp < cfg.swoopAbortHp (10)` → `HANDOFF("take_cover_overhead")`, `FAIL("too_many_or_hurt")`; `signals.shieldDurabilityPct < cfg.shieldMinDurabilityPct (10)`; the phantom `D > 16` for 200 ticks → `DONE("left")`.
 State per pump: `closing = (prevD − D) / 4` blocks per tick (first pump: undefined), `prevD`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
-| WATCH | `start` | `lowerShield()`; `stopMoving()`; `lookAt(t.id)` (rotate to face it). Dive detected: `t.diving`. `eta = closing > 0.02 ? D / closing : (t.diving && horizontalDistance <= 8 ? 14 : Infinity)` | `t.diving && eta <= 14` (about 10 ticks before contact plus a pump of slack) | GUARD |
-| GUARD | dive imminent | `lookAt(t.id)`; `raiseShield()`; `stopMoving()` | after the pass: `D <= 2.5`, or `D` increased for 2 consecutive pumps after having been `<= 4` | COUNTER |
+| WATCH | `start` | `lowerShield()`; `stopMoving()`; `lookAt(t.id)` (rotate to face it). Dive detected: `t.diving`. `eta = closing > 0.02 ? D / closing : (t.diving && distXZ(S.pos, t.pos) <= 8 ? 14 : Infinity)` | `t.diving && eta <= 14` (about 10 ticks before contact plus a pump of slack) | GUARD |
+| GUARD | dive imminent | `lookAt(t.id)`; `raiseShield()`; `stopMoving()` | after the pass: `D <= 2.5`, or `D` increased for 2 consecutive pumps after having been `<= 4`; or `age >= 60` (no contact) | COUNTER on a pass, WATCH on the 60-tick timeout |
 | COUNTER | pass over | `lowerShield()`; if `inReach && ready && t.pos.y <= S.eye.y + 1`: `tryAttack()` | same pump | WATCH |
-| (GUARD timeout) | `age >= 60` | no contact: | | WATCH |
 
 #### 3.3.10 `break_line_of_sight`
 
-Pre: `findCover(...)` finds a spot (`has_cover_within_8`) else `FAIL("no_cover")`; target = the shooter (`ranged`).
-Abort: `signals.hostileCount12 >= 2` with a second shooter having LOS to the bot (`ctx.threats().filter(m => m.ranged && m.id !== t.id && m.hasLos).length >= 1` while in WAIT) → `FAIL("flanked")`; `S.hp < 8` → `HANDOFF("retreat_and_regen")`, `FAIL("hp_low")`; the cover block is no longer solid (`world.blockAt(cover).isSolid` false) → re-run FIND once, second time `FAIL("cover_destroyed")`; `total > 400` → `FAIL("timeout")`.
+Pre: `findCover(..., accept)` finds a spot (`has_cover_within_8`) else `FAIL("no_cover")`; target = the shooter (`ranged`). The spot found by FIND (not by ADVANCE) is rejected, and `FAIL("no_cover")` returned (no handoff; the loop picks the next tactic, D15), if `dist3(spot.stand, S.pos) > 10` or `dist3(spot.stand, t.pos) < dist3(S.pos, t.pos)` (cover that is far, or toward the enemy, is not cover).
+Own cap: `total > 400` → `FAIL("timeout")`.
+Abort: `signals.hostileCountNear >= 2` with a second shooter having LOS to the bot (`ctx.threats().filter(m => m.ranged && m.id !== t.id && m.hasLos).length >= 1` while in WAIT) → `FAIL("flanked")`; `S.hp < cfg.coverAbortHp (8)` → `HANDOFF("retreat_and_regen")`, `FAIL("hp_low")`; the cover block is no longer solid (`world.blockAt(cover).isSolid` false) → re-run FIND once, second time `FAIL("cover_destroyed")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
@@ -684,20 +713,23 @@ Abort: `signals.hostileCount12 >= 2` with a second shooter having LOS to the bot
 
 #### 3.3.11 `retreat_and_regen`
 
-Pre: any.
+Pre: any. Leash-exempt (L3).
+Own cap: `total > cfg.retreatTotalCapTicks (1800 = regenMaxTicks + 600)` → `FAIL("timeout")`; P0 step 6 (600) does not apply. The REGEN phase is additionally bounded by `cfg.regenMaxTicks` (1200) of its own `age`.
 Abort: a new threat with `aggroed && distance < 8` that was not in the set at `start` → `FAIL("new_threat")` (the loop then picks flee/escape).
-State: `threatsAtStart`, `lastReplanAt`, `eats` (count).
+State: `threatsAtStart`, `lastReplanAt`, `eats` (count), `lastEatFailAt` (−1000).
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
-| RUN | `start` | Every 20 ticks (and at age 0) pick the destination: `ctx.home` if defined and `dist3(S.pos, home) <= 64` and `dist3(home, nearestThreat) > dist3(S.pos, nearestThreat)`; else `ctx.owner` under the same test; else `pickFleeDirection(world, S.pos, ctx.threats(), 6).waypoint`; none → `FAIL("boxed_in")`. `setSprinting(canSprint)`. Home/owner: `navigateToward(dest, 1.0)` (fallback `moveToward`); waypoint: `moveToward(dest, 1.0)`. If sprinting stalls (displacement < 0.4 blocks over the last pump while on ground): `jump()` | `minD >= cfg.retreatSafeDist (16)` or `(minD >= cfg.retreatSafeDistNoLos (12) && no threat hasLos)` where `minD` = min distance to any threat | SETTLE |
+| RUN | `start` | Every 20 ticks (and at age 0) pick the destination: `ctx.home` if defined and `dist3(S.pos, home) <= 64` and `dist3(home, nearestThreat) > dist3(S.pos, nearestThreat)` **and the segment `S.pos → home` stays at least `cfg.retreatRunClearDist (8)` blocks from every threat** (point-to-segment distance in XZ); else `ctx.owner` under the same three tests; else `pickFleeDirection(world, S.pos, ctx.threats(), 6).waypoint`; none → `FAIL("boxed_in")`. `setSprinting(canSprint)`. Home/owner: `navigateToward(dest, 1.0)` (fallback `moveToward`); waypoint: `moveToward(dest, 1.0)`. If sprinting stalls (displacement < 0.4 blocks over the last pump while on ground): `jump()` | `minD >= cfg.retreatSafeDist (16)` or `(minD >= cfg.retreatSafeDistNoLos (12) && no threat hasLos)` where `minD` = min distance to any threat | SETTLE |
 | SETTLE | out of danger | `setSprinting(false)`; `stopMoving()` | same pump | REGEN |
-| REGEN | settled | If `S.hunger < 18 \|\| S.hp < S.maxHp` and `eats < cfg.regenMaxEats (4)`: `food = ctx.chooseFood()`; if defined and no threat within `cfg.eatHardMinThreatDist` run an `EatRunner` (§4) as a sub-step (one at a time; `eats++` when it ends `done`). Else just wait (`stopMoving()`), keep `lookAt(nearest threat)` | `S.hp >= signals.reengageHp` and `minD >= 12`; or `age >= cfg.regenMaxTicks (1200)` | `DONE("recovered")` / `DONE("regen_timeout")` |
+| REGEN | settled | If `S.hunger < 20` and (`S.hunger < 18 \|\| S.hp < S.maxHp`) and `eats < cfg.regenMaxEats (4)` and `now − lastEatFailAt >= cfg.regenEatRetryTicks (40)`: `food = ctx.chooseFood()`; if defined and no threat within `cfg.eatHardMinThreatDist`: `EatRunner.start(ctx, { slot: food.slot, typeId: food.typeId, eatTicks: food.eatTicks, mode: "normal" })` as a sub-step (one at a time; `eats++` when it ends `done`); if `start` returns false set `lastEatFailAt = now`. Else just wait (`stopMoving()`), keep `lookAt(nearest threat)`. **No-food exit:** if `S.hunger < 18` and `ctx.chooseFood()` is undefined and no eat is running, the wait cannot heal (natural regeneration needs hunger >= 18): `DONE("no_food")`. | `S.hp >= signals.reengageHp` and `minD >= 12`; or `age >= cfg.regenMaxTicks (1200)` | `DONE("recovered")` / `DONE("regen_timeout")` |
 
 #### 3.3.12 `flee_sneak` (warden, vibration sensing)
 
-Pre: none beyond P1. `awayFrom` = `t.pos` if a target exists, else `ctx.awayFrom`, else `ctx.home ?? ctx.owner`, else the bot's facing reversed.
-Abort: the warden is aggroed on the bot and `D < 10` → `HANDOFF("sprint_away")`, `FAIL("warden_aggro")`. `total > 600` → `FAIL("timeout")`.
+Pre: none beyond P1. Leash-exempt (L3). `awayFrom` = `t.pos` if a target exists, else `ctx.awayFrom`, else `ctx.home ?? ctx.owner`, else `{x: S.pos.x − 10*S.facing.x, y: S.pos.y, z: S.pos.z − 10*S.facing.z}` (the bot's facing reversed).
+Reachability note: S1 §9.3's warden reflex preempts the brain while a warden is within `wardenFleeRadius` and owns warden handling there. `flee_sneak` is started by the decision loop only when no reflex is active (a warden or darkness outside the reflex trigger, other `vibration_sensing` entries, tests). It is still the MOBS-conformant implementation and must work standalone.
+Own cap: `total > 600` → `FAIL("timeout")`.
+Abort: the warden is aggroed on the bot and `D < 10` → `HANDOFF("sprint_away")`, `FAIL("warden_aggro")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
@@ -708,36 +740,41 @@ Abort: the warden is aggroed on the bot and `D < 10` → `HANDOFF("sprint_away")
 #### 3.3.13 `avoid_path_around`
 
 No-go radius (blocks) from `cfg.avoidRadius[typeId] ?? cfg.avoidRadiusDefault (6)`: enderman 16, creeper 8, warden 30, phantom 0, others 6. Radius 0 → `start` returns false (`reason="no_zone"`).
-Abort: `t.aggroed` (the mob targets the bot) → `FAIL("mob_aggroed")` (the loop switches to the entry's other tactics); `total > 100` after the zone is blocked → `FAIL("path_blocked")` (S5/colony may then offer override).
-This tactic does not drive a long walk; it clears the bot out of the zone and publishes the zone so executors re-plan.
+Leash-exempt (L3).
+Abort: `t.aggroed` (the mob targets the bot) → `FAIL("mob_aggroed")` (the loop switches to the entry's other tactics). The HOLD cap is in the HOLD row.
+Decision (Phase 3): no-go zones are **not read by executors**. `ctx.publishNoGo(zone)` only stores the zone in the controller (`noGoZones`, used by `!status` and logs); nothing re-plans around it. This tactic does not drive a long walk; it clears the bot out of the zone and holds.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | CLEAR | `start` and `D < radius` | `setSprinting(canSprint && D < radius * 0.5)`; point = `t.pos + unitXZ(t.pos → S.pos) * (radius + 2)`; if not `standable`, try rotating ±30°, ±60°, ±90° (first standable); `navigateToward(point, 1.0)`; do NOT `lookAt` the mob if it is `gaze_aggro` (enderman); else `lookAt` the point | `D >= radius + 1` | HOLD |
-| HOLD | outside the zone | `setSprinting(false)`; `stopMoving()`. Every 20 ticks: `ctx.publishNoGo({ center: t.pos, radius, expiresAt: now + 40, mobId: t.id })` (B3 gives it to the executor's `resume()` re-plan). | `D > radius + 12` or the mob is gone | `DONE("clear")` |
+| HOLD | outside the zone | `setSprinting(false)`; `stopMoving()`. Every 20 ticks: `ctx.publishNoGo({ center: t.pos, radius, expiresAt: now + 40, mobId: t.id })` (the controller stores it, see above). `age >= cfg.avoidHoldMaxTicks (100)` → `FAIL("path_blocked")`. | `D > radius + 12` or the mob is gone | `DONE("clear")` |
 
 #### 3.3.14 `sprint_away`
 
-Pre: P1. `canSprint` may be false: the bot then runs at walk speed (still `moveToward(..., 1.0)`), logged once.
-Abort (the "cannot outrun" rule): `t.entry.move_speed === "fast"` (the entry in `ctx.entry`) and `D < 3` → `FAIL("cannot_outrun")` (no handoff set; the loop picks the entry's other tactic or escape-rejoin). `total > 400` → `FAIL("timeout")`.
+Pre: P1. Leash-exempt (L3). Own cap: `total > 400` → `FAIL("timeout")`. `canSprint` may be false: the bot then runs at walk speed (still `moveToward(..., 1.0)`), logged once.
+Abort (the "cannot outrun" rule): `ctx.entry.move_speed === "fast"` and `D < 3` → `FAIL("cannot_outrun")` (no handoff set; the loop picks the entry's other tactic or escape-rejoin).
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | TURN | `start` (tick 0) | `stopBreaking()`; `lowerShield()`; `setSneaking(false)`; `pick = pickFleeDirection(world, S.pos, ctx.threats(), 6)`; none → `FAIL("boxed_in")` | same pump | RUN |
-| RUN | after TURN | `setSprinting(canSprint)`; every 20 ticks re-pick the direction (prefer one that puts a solid 2-high block between the bot and `t` within 40 ticks: add `+0.5` to the score of a bearing whose first 10 cells contain such a block next to the path); `moveToward(waypoint, 1.0, true)` (faces the run direction). If displacement over the last pump < 0.4 and `S.onGround` → `jump()` (at most once per 2 pumps) | `min distance to all threats >= cfg.sprintAwayDist (24)` | `setSprinting(false)`, `stopMoving()`, `DONE("clear")` |
+| RUN | after TURN | `setSprinting(canSprint)`; every 20 ticks re-pick the direction (prefer one that puts a solid 2-high block between the bot and `t` within 40 ticks: add `+0.5` to the score of a bearing whose first 10 cells contain such a block next to the path); `moveToward(waypoint, 1.0, true)` (faces the run direction). If displacement over the last pump < 0.4 and `S.onGround` → `jump()` (at most once per 2 pumps) | `minD >= cfg.sprintAwayDist (24)` | `setSprinting(false)`, `stopMoving()`, `DONE("clear")` |
 
 #### 3.3.15 `take_cover_overhead`
 
-Pre: `findRoof(...)` returns a spot else `FAIL("no_roof")`.
-Abort: a non-flying threat within 4 blocks of the spot while in WAIT (`hostile in cover`) → `FAIL("hostile_in_cover")`. `total > 1500` → `FAIL("timeout")`.
+Pre: `findRoof(...)` returns a spot else `FAIL("no_roof")`. Leash-exempt (L3).
+Own cap: `total > 1500` → `FAIL("timeout")`.
+Abort: a non-flying threat within 4 blocks of the spot while in WAIT (`hostile in cover`) → `FAIL("hostile_in_cover")`.
 
 | Phase | Entry | Each pump | Exit | Next |
 |---|---|---|---|---|
 | MOVE | `start` | `setSprinting(canSprint && any threat within 12)`; `navigateToward(roof, 1.0)` (fallback `moveToward`) | `distXZ(S.pos, roof) <= 0.8` | WAIT |
-| WAIT | under the roof | `setSprinting(false)`; `stopMoving()`; `openDir = unitXZ(roof → nearest non-roofed cell within 4)`; `lookAt({x: roof.x + 2*openDir.x, y: S.pos.y, z: roof.z + 2*openDir.z})`; `raiseShield()` if `canBlock()`. `lastSightingAt = now` on every pump where some threat within 24 has LOS | `now − lastSightingAt >= cfg.takeCoverQuietTicks (200)` | `lowerShield()`, `DONE("quiet")` |
+| WAIT | under the roof | `setSprinting(false)`; `stopMoving()`; `openDir = unitXZ(roof → nearest cell within 4 with `!roofed(world, cell)`)`; `lookAt({x: roof.x + 2*openDir.x, y: S.pos.y, z: roof.z + 2*openDir.z})`; `raiseShield()` if `canBlock()`. `lastSightingAt = now` on every pump where some threat within 24 has LOS | `now − lastSightingAt >= cfg.takeCoverQuietTicks (200)` | `lowerShield()`, `DONE("quiet")` |
 
 ### 3.4 Tactic stats for outcome logs
 `runner.hits` and `total` ticks are read by B3 when the runner ends. Damage taken is measured by S2/S1 from HP deltas; the body does not compute it.
+
+### 3.5 Who maps a Decision to a runner (no S3 code)
+The table `Decision.option → TacticRunner / body call` and the handling of a failed `TacticRunner.start` live in the combat executor of `BotController` (**S1 §2/§3, decision D13**). S3 only provides the runners and `EatRunner`. Contract S3 gives that executor: `start()` returning `false` sets `reason` and has changed nothing; `step()` returning `"failed"` leaves `reason` and optionally `handoff`; the executor then tries `handoff`, then the fallback order of D15 (`hit_and_back_off` if melee is allowed, else `avoid_path_around`, else `sprint_away`). Tactics never refuse for lack of a weapon (W, §3.2), so an unarmed bot is still given the same tactics; the decision layer (S2) decides whether to engage.
 
 ---
 
@@ -769,8 +806,8 @@ export class EatRunner {
 **Start guard** (all must hold; first failure sets `reason` and returns false):
 1. The slot holds `req.typeId` (`body.startEating` returns `"no_item"` otherwise).
 2. `body.eatStatus() === "idle"`.
-3. No threat in `ctx.threats()` within `cfg.eatHardMinThreatDist` (4 blocks) in `normal` mode (`reason = "threat_near"`). In `emergency` mode the floor is 2 blocks unless `S.hp <= 4` (then no floor), matching TABLES §3.1 "not while a melee mob is already within 2 unless HP <= 4".
-4. `S.hunger < 20` unless the typeId is always-edible (`golden_apple`, `enchanted_golden_apple`, `chorus_fruit`, `honey_bottle`); the engine refuses otherwise and `startEating` returns `"failed"`.
+3. No threat in `ctx.threats()` within `cfg.eatHardMinThreatDist` (4 blocks) in `normal` mode (`reason = "threat_near"`). In `emergency` mode the floor is `cfg.eatEmergencyMinThreatDist` (2) blocks unless `S.hp <= cfg.eatEmergencyHp` (4) (then no floor), matching TABLES §3.1 "not while a melee mob is already within 2 unless HP <= 4".
+4. `S.hunger < 20` unless the typeId is always-edible (`minecraft:golden_apple`, `minecraft:enchanted_golden_apple`, `minecraft:chorus_fruit`); every other food, **including `minecraft:honey_bottle` (D20)**, follows the normal hunger rule. The engine refuses otherwise and `startEating` returns `"failed"`.
 (The larger "eat_guard" distance of TABLES §3.1, `eat_ticks/20*5 + 2` blocks, is S2's decision input; the body only enforces the hard floor.)
 
 **Script** (a pump = 4 ticks; 32-tick food = 8 pumps):
@@ -787,17 +824,17 @@ export class EatRunner {
 
 **Adapter `startEating(slot)`** (in `adapter/body.ts`):
 1. `item = inv.getItem(slot)`; undefined → `"no_item"`. `item.getComponent('minecraft:food')` undefined → `"not_food"`.
-2. `setSprinting(false)`; `lowerShield()`.
+2. `setSprinting(false)`; `lowerShield()` (this may fire an `itemStopUse` for the shield; step 5 and the handler below make it harmless).
 3. If `slot >= 9`: `inv.swapItems(slot, cfg.foodSlot, inv)` (engine swap, conserving); `useSlot = cfg.foodSlot`; else `useSlot = slot`. Remember `swapped = {from: slot, to: foodSlot}` (not swapped back; the equipment manager normalises the hotbar later).
 4. `prevSelected = p.selectedSlotIndex`; `p.selectedSlotIndex = useSlot`.
-5. `before = { amount: inv.getItem(useSlot).amount, typeId, hunger: self.hunger, sat: self.saturation, tick: now }`.
+5. `before = { amount: inv.getItem(useSlot).amount, typeId, hunger: self.hunger, sat: self.saturation, tick: now }`, taken **after** `lowerShield()` has returned (step 2), so `before.tick` is never earlier than a shield stop event.
 6. `ok = p.useItemInSlot(useSlot)`. `false`/throw → undo steps 4 and 3 (select `prevSelected`; swap back), return `"failed"`.
-7. State becomes `eating`, return `"started"`. Event bookkeeping is by `initBodyEvents()`: for this bot's id the adapter has `lastComplete?: {tick, typeId}` and `lastStop?: {tick, typeId}`.
+7. State becomes `eating`, return `"started"`. Event bookkeeping is by `initBodyEvents()`: for this bot's id the adapter has `lastComplete?: {tick, typeId}` and `lastStop?: {tick, typeId}`. **Handler condition (both events): record only if `ev.source.id === p.id` and `ev.itemStack.typeId === eating.typeId`** (`eating` = the meal in progress; no meal in progress means ignore). A stop event for the shield (from `lowerShield()`'s `stopUsingItem`) therefore never reads as an interrupted meal.
 
 **Adapter `eatStatus()`** (evaluated lazily at each call, cheap):
 - `done` if any of: (a) `lastComplete.tick >= before.tick` (itemCompleteUse); (b) the stack in `useSlot` has fewer items than `before.amount`, or the slot is empty, or its typeId changed; (c) `self.hunger > before.hunger` (covers a missing event). Then: `p.stopUsingItem()` (ignore result), restore `prevSelected`, state → idle, return `"done"` once.
 - `interrupted` if `lastStop.tick >= before.tick` and not done (itemStopUse without completion): restore slot, idle, return once.
-- `failed` if `now − before.tick > eatTicks + 10` (the adapter knows `eatTicks` from `startEating`'s table lookup `config.body.eatTicksByType[typeId] ?? 32`); call `stopUsingItem()`, restore slot, idle, return once.
+- `failed` if `now − before.tick > eatTicks + 10` (the adapter knows `eatTicks` from `startEating`'s table lookup `config.body.eatTicksByType[typeId] ?? 32`, `typeId` with the `minecraft:` prefix); call `stopUsingItem()`, restore slot, idle, return once.
 - else `eating`; `idle` if nothing started.
 `stopEating()`: `stopUsingItem()`; restore `prevSelected`; state idle (reports nothing).
 
@@ -817,12 +854,14 @@ Armour protection points `[head, chest, legs, feet]`, toughness per piece, mater
 |---|---|---|---|---|---|---|
 | leather | 1 | 3 | 2 | 1 | 0 | 1 |
 | golden | 2 | 5 | 3 | 1 | 0 | 2 |
-| copper (verify exists) | 2 | 4 | 3 | 1 | 0 | 3 |
+| copper (1.21.9+; values verify) | 2 | 4 | 3 | 1 | 0 | 3 |
 | chainmail | 2 | 5 | 4 | 1 | 0 | 4 |
 | iron | 2 | 6 | 5 | 2 | 0 | 5 |
 | diamond | 3 | 8 | 6 | 3 | 2 | 6 |
 | netherite | 3 | 8 | 6 | 3 | 3 | 7 |
 | turtle (head only: `turtle_helmet`) | 2 | - | - | - | 0 | 3 |
+
+Rows for ids that do not exist in the game are never matched (matching is by exact typeId `minecraft:<material>_<piece>`; copper uses `minecraft:copper_*`).
 
 Slot by typeId suffix: `_helmet` → head, `_chestplate` → chest, `_leggings` → legs, `_boots` → feet. `minecraft:elytra`, `minecraft:carved_pumpkin` and anything else are not armour here.
 
@@ -835,14 +874,16 @@ Weapon damage (Bedrock, consistent with MOBS §1.1; `kind` rank in brackets):
 | wooden | 4 | 3 | 2 | 1 |
 | golden | 4 | 3 | 2 | 1 |
 | stone | 5 | 4 | 3 | 2 |
-| copper (verify exists) | 5 | 4 | 3 | 2 |
+| copper (1.21.9+; values verify) | 5 | 4 | 3 | 2 |
 | iron | 6 | 5 | 4 | 3 |
 | diamond | 7 | 6 | 5 | 4 |
 | netherite | 8 | 7 | 6 | 5 |
 
-Spears (`*_spear`) and every other item: not weapons in Phase 3. `weaponScore = damage + (sharpness ? 0.5 + 0.5*level : 0)`; ties: higher `kind`, then more remaining durability points, then lower slot. Durability cost per hit: sword 1, others 2 (a tool used as a weapon loses 2).
+Spears (`*_spear`) and every other item: not weapons in Phase 3. `weaponScore = damage + 1.25 * sharpnessLevel` (Bedrock, D20: +1.25 damage per level; I = 1.25, V = 6.25; `sharpnessLevel` = level of `"sharpness"` in `ItemStackView.enchants`, 0 if absent; example: stone sword with sharpness V = 5 + 6.25 = 11.25 > plain diamond sword 7); ties: higher `kind`, then more remaining durability points, then lower slot. Durability cost per hit: sword 1, others 2 (a tool used as a weapon loses 2).
 
 Shield: `minecraft:shield`; score = remaining durability fraction + 0.25*unbreaking + 0.5*mending.
+
+**`counter_gear` (MOBS §1.2).** Phase 3 acts only on the kinds `shield`, `sword`, `axe` and `armor`, and only through this ranking (the manager always wants the best of each, whatever the mob). All other kinds (`carved_pumpkin`, `food`, `milk_bucket`, `water_bucket`, `blocks`, `none`) are ignored by the equipment manager and logged once per kind at debug level (`food` is S2's concern).
 
 **Durability** of a stack: `remaining = durability.max − durability.damage` (points), `frac = remaining / max`; no durability component → `remaining = Infinity`, `frac = 1`.
 - `low(stack)` = `remaining <= cfg.swapDurabilityPoints (5)` **or** `frac <= cfg.swapDurabilityFraction (0.10)`.
@@ -854,13 +895,14 @@ Shield: `minecraft:shield`; score = remaining durability fraction + 0.25*unbreak
 ```ts
 export interface EquipState {
   inventory: InventorySnapshot;          // 36 slots
-  equipment: EquipmentView;
+  equipment: EquippedStacks;
   chest?: InventorySnapshot;             // only when the bot is within container reach of the colony chest
   method: ShieldMethod;                  // cfg.shieldMethod
   cfg: BodyConfig;
   selectedSlot: number;
 }
-export type AskNeed = "weapon" | "shield" | "helmet" | "chestplate" | "leggings" | "boots" | "food";
+// AskNeed is defined once in `core/types.ts` (S5 §6, with BotNotice) and imported here:
+//   export type AskNeed = "weapon" | "shield" | "helmet" | "chestplate" | "leggings" | "boots" | "food";
 export type EquipAction =
   | { kind: "equip"; fromSlot: number; to: EquipSlotName; why: string }
   | { kind: "hotbar_swap"; a: number; b: number; why: string }     // WorkerBody.swapSlots
@@ -889,7 +931,8 @@ Deterministic algorithm (for each step candidates come from `inventory`; chest c
      - `cur` exists, `usable(cur)` and `bestUsable.score >= armorScore(cur) + cfg.upgradeMinGainArmor (1.0)` → upgrade.
      - `cur` low and no usable replacement → add `S` to `report.low`.
    - A `fetch` is only emitted for a chest stack; it replaces the equip for this plan (the next plan equips from inventory).
-2. **Weapon:** `bestUsable` among inventory stacks with a weapon score and `usable` (ties per §5.1). Chest stacks only fetch **swords** (never axes/pickaxes: the gatherer needs those). If `bestUsable` is undefined: fall back to the best stack with `remaining > cfg.preserveRemainingPoints`; if that exists put it in `report.low`; if none, `hasWeapon = false` and `missing = ["weapon"]`. If the chosen weapon is already in the hotbar at slot `j`: `select j`; else `hotbar_swap(chosenSlot, cfg.weaponSlot)` then `select cfg.weaponSlot`. If the selected weapon is only `+< cfg.upgradeMinGainWeapon (1.0)` better than the current one and the current is usable, keep the current.
+2. **Weapon:** `bestUsable` among inventory stacks with a weapon score and `usable` (ties per §5.1). Chest stacks only fetch **swords** (never axes/pickaxes: the gatherer needs those). If `bestUsable` is undefined: fall back to the best stack with `remaining > cfg.preserveRemainingPoints`; if that exists put it in `report.low`; if none, `hasWeapon = false` and `missing = ["weapon"]`. If the chosen weapon is already in the hotbar at slot `j`: `select j`; else `hotbar_swap(chosenSlot, cfg.weaponSlot)` then `select cfg.weaponSlot`. If `damageScore(best) − damageScore(selectedWeapon) < cfg.upgradeMinGainWeapon (1.0)` and `selectedWeapon` is `usable`, keep `selectedWeapon` (`damageScore` = `weaponScore`; `selectedWeapon` = the stack in the currently selected hotbar slot, if it is a weapon).
+   - **Unarmed (D14):** when no weapon passes (`hasWeapon = false`), the bot is unarmed: fist damage 1, the same tactics run (§3.2 `W`), `signals.unarmed = true`, and `ask(weapon)` is raised through `equipNeed` (§5.4).
 3. **Shield:** `bestShield` = highest shield score with `remaining > cfg.preserveRemainingPoints` and `usable` (if none usable, the best non-preserved one goes to `report.low`).
    - `method "sneak"`: target `offhand`. If offhand holds a different item: never displace `minecraft:totem_of_undying` (then `hasShield=false`); any other item is displaced by the swap (it lands in the shield's old slot). `equip`/`fetch` as for armour.
    - `method "use_item"`: if the shield is not at `cfg.shieldHotbarSlot` → `hotbar_swap(its slot, shieldHotbarSlot)` (displaces that slot's item into the shield's old slot). Offhand untouched.
@@ -906,19 +949,22 @@ export class EquipmentManager {
   constructor(deps: {
     body: CombatBody; world: WorldPort; cfg: BodyConfig;
     colonyChest: () => ChestRef | undefined;        // from colony state (Phase 2 `!chest set`)
+    notify: (n: BotNotice) => void;                 // D24: B3 wires it to the S5 `botNotice` event; the manager never sends chat
     onChanged: () => void;                          // marks the snapshot dirty (S4); called after every successful equip/unequip/swap
     botName: string;
   });
-  /** Run the planner and execute at most cfg.equipActionsPerPump (1) mutating action. Call from BotController.tick. */
+  /** Run the planner and execute at most cfg.equipActionsPerPump (1) mutating action. Call from BotController.tick.
+   *  `threatsNear` = count of entities with `classification === "threat"` and `distance <= cfg.equipBusyThreatDist`.
+   *  Stores `lastCtx = ctx` (read by `ask`). */
   tick(now: Tick, ctx: { threatsNear: number; fighting: boolean }): void;
   markDirty(reason: "spawn" | "rejoin" | "pickup" | "chest" | "fight_end" | "periodic"): void;
   /** Re-select the best weapon's hotbar slot (cheap, no scan, no chest). false = no usable weapon. */
   ensureWeaponSelected(): boolean;
   /** Call when the bot stands within container reach of a chest (after a deposit, on rejoin at home). */
   onNearChest(chest: ChestRef): void;
-  report(): EquipReport | undefined;                // last plan's report, for S1 (sensor) and `!status`
+  report(): EquipReport | undefined;                // last plan's report, for S1 BotController (foodCount, armorPieces, hasShield in BotStatusView)
   suspend(): void; resume(): void;                  // S4 flows pause the manager while a snapshot is taken
-  ask(need: AskNeed, low: boolean, now: Tick): boolean;   // exact chat lines, rate limited (§5.4)
+  ask(need: AskNeed, low: boolean, now: Tick): boolean;   // emits notify({ id: "equipNeed", need, low }); rate limited (§5.4)
 }
 ```
 
@@ -937,40 +983,37 @@ A failed action (returns false) is not retried for `cfg.equipRetryTicks` (200) a
 
 **Fetch from the colony chest:** `onNearChest(chest)` reads `world.containerAt(chest.pos)` once (an `InventorySnapshot`), runs the planner with `chest` filled, and executes at most `cfg.chestFetchMaxPerVisit` (3) `fetch` actions, one per pump. It never takes axes/pickaxes/shovels or anything that is not a sword, armour piece or shield. It never walks to the chest (Phase 3 only fetches when already adjacent; walking there is a task executor concern).
 
-### 5.4 Ask in chat
+### 5.4 Ask (typed notice, D24)
 
-`ask(need, low, now)` sends (via `body.chat`, which prefixes `<Bot-N> `) one of these exact lines, `{item}` ∈ `weapon, shield, helmet, chestplate, leggings, boots`:
+The equipment manager sends **no chat text** (the `chat` port method was removed). `ask(need, low, now)` emits, through the injected `deps.notify`:
 
-| Condition | Colony chest set | Text |
-|---|---|---|
-| need = weapon, not low (none owned) | yes | `I have no weapon. Please put a sword in the colony chest.` |
-| need = weapon, not low | no | `I have no weapon. Please give me a sword.` |
-| low item | yes | `My {item} is almost broken. Please put a spare in the colony chest.` |
-| low item | no | `My {item} is almost broken. Please give me a spare.` |
-| need = food (called by S2) | yes | `I am out of food. Please put some in the colony chest.` |
-| need = food | no | `I am out of food. Please give me some.` |
+```ts
+notify({ id: "equipNeed", need, low });   // BotNotice, S5 §6; need: AskNeed; low = the item exists but is almost broken
+```
+
+The core (S5 §6, `messages.ts`) renders the text and routes it to the bot's owner; it knows whether `colonyChest` is set and picks the variant. The six cases S3 needs (wording owned by S5): need = weapon not low (chest set / not set); low item (chest set / not set); need = food (chest set / not set; `food` is raised by S2). `{item}` is one of `weapon, shield, helmet, chestplate, leggings, boots`.
 
 Rate limit (ledger kept in a module-level `Map<botName, ...>` so it survives dismiss/rejoin within a session):
 - Per bot and per `need`: at most one ask every `cfg.askCooldownTicks` (6000 = 5 minutes).
 - Per bot, any need: at least `cfg.askGlobalGapTicks` (600 = 30 s) between two asks.
-- Not while `ctx.fighting` or `threatsNear > 0`.
+- Not while `lastCtx.fighting` or `lastCtx.threatsNear > 0`; `ask` reads `lastCtx` from the last `tick`; if `tick` has never run, `ask` returns false.
 - At most one ask per planner run (the first by priority: weapon, shield, chestplate, leggings, helmet, boots).
-`ask` returns `true` only if a line was sent.
+`ask` returns `true` only if a notice was emitted.
 
 ---
 
 ## 6. Probes owned by B5 and the fallback per probe
 
-B5 writes `src/probes/combat/*.ts` for the probes the body depends on. Each probe prints one summary line `[colony-probe] P<n> <result>` and returns the data below. The player/lead copies the result into `config.body`. Until a probe has run, the **default** column applies.
+B5 writes `src/probes/combat/*.ts` for the probes the body depends on. Each probe prints one line in the S6 §1.1 format `[probe] <name>: RESULT <PASS|FAIL|INCONCLUSIVE> - <summary> | SET <key>=<value>`; the probe names are those of S6 §1.2 (P1 `shield`, P2 `eating`, P3 `attack`, P6 `sneak`, P7 `creeper`, P10 `movement`, P11 `hunger`, P14 `shielddisabled`); the `P<n>` ids below are the API-MAP ids, kept for cross-reference only. The player/lead copies the SET values into `config.body` (the creeper SET key is `combat.hissProxyEnabled`). Until a probe has run, the **default** column applies.
 
 | Probe (API-MAP) | Body feature that depends on it | Config it decides | Default until probed | Fallback if the result is negative |
 |---|---|---|---|---|
 | **P1 shield block** (modes: sneak+offhand, hotbar+`useItemInSlot`, none) | `raiseShield`, `canBlock`, every shield tactic, equipment shield placement | `shieldMethod`, `shieldEnabled`, `shieldRaiseTicks` | `"sneak"`, enabled, 5 | Mode A fails and B works → `"use_item"`. Neither works → `shieldEnabled=false`: shield tactics are never chosen (S2 sees `bot_has_shield=false`), the bot relies on armour and `back_off`/`retreat` options. |
 | **P2 eating via `useItemInSlot`** | `startEating`/`eatStatus`, `EatRunner`, retreat_and_regen | `eatEnabled`, `eatTicksByType`, whether `stopUsingItem` is needed after completion | enabled, TABLES ticks | Not consumed / never completes → `eatEnabled=false`: S2 treats `eat` as unavailable, bots recover only by natural regen (retreat_and_regen waits) until the player approves `allowManualEat` (`Player.eatItem` + manual decrement, API-MAP §C7). |
-| **P3 `attackEntity` reach/cooldown/crit** | `attackTarget` interval and reach, `melee_crit`, `rush_kill` | `attackIntervalTicks`, `meleeReach` (reach cap stays regardless), `critEnabled` | 10, 3.0, true | No crit bonus → `critEnabled=false` (melee_crit/rush_kill use PLAIN). Engine cooldown longer than 10 → raise `attackIntervalTicks` to the measured value. If `attackEntity` is flaky: use `lookAtEntity(Instant)` + `p.attack()` inside `attackTarget` (still behind the same reach/LOS checks). |
+| **P3 `attackEntity` reach/cooldown/crit** | `attackTarget` interval and reach, `melee_crit`, `rush_kill` | `attackIntervalTicks`, `meleeReach` (reach cap stays regardless), `critEnabled`; also measure the displacement of a sprint-hit (unverified knockback, used by `hit_and_back_off` and `knockback_then_retreat`; informational) | 10, 3.0, true | No crit bonus → `critEnabled=false` (melee_crit/rush_kill use PLAIN). Engine cooldown longer than 10 → raise `attackIntervalTicks` to the measured value. If `attackEntity` is flaky: use `lookAtEntity(Instant)` + `p.attack()` inside `attackTarget` (still behind the same reach/LOS checks). |
 | **P6 `isSneaking` writable** | `setSneaking`, shield method `"sneak"`, `flee_sneak` | `sneakEnabled` | true | Not writable → `sneakEnabled=false`: `shieldMethod` must be `"use_item"`; `flee_sneak` degrades to walking away at walk speed without jumping/sprinting and hands off to `sprint_away` when the warden aggros. |
 | **P10 movement primitives** (`moveRelative` + `Continuous` look; `dropSelectedItem`) | `strafe`, `backOff`, `lookAt` tracking, `dropSlot` | `relativeMoveMethod`, `strafeLeftSign` | `"relative"`, +1 | `moveRelative` breaks the look or does not persist → `relativeMoveMethod="move_to"` (`moveToLocation` lateral/back points, 3 blocks away, re-issued each pump). `Continuous` look does not track → no change needed (runners re-issue `lookAt` each pump). `dropSelectedItem` drops 1 → S4 loops (already designed). |
-| **P7 creeper ignition readable** | `MobView.hissing` for `knockback_then_retreat`, `shield_hold` | `hissProxyEnabled` | true (proxy: creeper within `hissProxyDist` 3) | `is_ignited` works → set `hissProxyEnabled=false` and use the component. |
+| **P7 creeper ignition readable** | `MobView.hissing` for `knockback_then_retreat`, `shield_hold` | `combat.hissProxyEnabled` (S2b) | true (proxy: creeper within `combat.hissProxyDist` 3) | `is_ignited` works → set `combat.hissProxyEnabled=false` and use the component. |
 | **P11 hunger/saturation on bots** | `setSprinting` gating (hunger >= 7), eat completion by hunger increase | none (if the component is missing the adapter returns `hunger=20`) | n/a | Components missing → sprint is never gated; completion relies on events + stack amount. |
 | **P5 `playerInventoryItemChange` for bots** | not required by the body | n/a | n/a | The body never relies on it (equipment changes call `onChanged()` directly). |
 | **P14 shield disabled by axe** | `signals.shieldDisabled` is read-only input from S1 | n/a (S1 owns the atom) | `false` | If unknown: `shield_hold` still aborts at `shieldDurabilityPct < 10`. |
