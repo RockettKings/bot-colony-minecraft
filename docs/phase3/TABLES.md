@@ -227,9 +227,7 @@ Milk bucket and potions are not food. They have value rows in 4.6 (`milk_bucket`
     "emergencyHpAnyThreat": 4,
     "starvingHunger": 6,
     "poisonMinHp": 8,
-    "eatGuardThreatSpeed": 5,
-    "eatGuardMargin": 2,
-    "preEngageContactMarginTicks": 20
+    "eatGuardThreatSpeed": 5
   }
 }
 ```

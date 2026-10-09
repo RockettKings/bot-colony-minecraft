@@ -95,6 +95,7 @@ All of these live in `src/core/combat/types.ts` or `src/core/snapshot/types.ts`,
 | `FoodEntry`, `FoodSituation`, `ItemValueEntry` | interfaces | TS form of the TABLES.md rows | B2 transcribes; shape in S2 |
 | `BotSnapshot`, `SnapItem`, `RestoreToken`, `SnapshotFlowState` | types | Snapshot model and flow states | S4 |
 | `DefendTask` | Task kind `"defend"` | `{ id, kind: "defend", center: Vec3, radius, issuer, createdAt }`: a long-running patrol until stopped | S5 |
+| `ColonyConfig` | interface | Existing colony config, extended by S5 (`statusStaleTicks`, `statusPushTicks`, `flowTimeoutTicks`); `Phase3Config.colony` | S5 |
 | `Phase3Config` | interface | `config.combat`, `config.snapshot`, `config.body`, `config.idle`: every key with default, unit and meaning | Each section lists its own keys; the contract writer merges them into `src/core/config.ts` |
 
 **Executor contract change (S1 defines it exactly):** `TaskExecutor` gains `pause(now: Tick): void` and `resume(now: Tick): void`.

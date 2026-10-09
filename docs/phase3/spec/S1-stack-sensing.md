@@ -382,7 +382,7 @@ export interface CombatExecutor {
   activeNoGo(now: Tick): readonly NoGoZone[];
 }
 
-export type BrainFn = (p: Percept, s: BrainState, kb: Knowledge, cfg: CombatConfig) => { decision: Decision; brainState: BrainState };
+export type BrainFn = (p: Percept, s: BrainState, kb: Knowledge, cfg: CombatConfig, rng: Rng) => { decision: Decision; state: BrainState }; // = S2b decide (D30)
 
 /** S4's snapshot service, as the controller uses it. */
 export interface SnapshotHandle {
@@ -416,7 +416,7 @@ export interface ControllerDeps {
   body: CombatBody;
   sense: SensePort; // §5.1
   world: () => WorldPort | undefined;
-  brain: BrainFn; // S2b decide(), runtime-bound with its seeded Rng
+  brain: BrainFn; // S2b decide(); the controller passes the runtime's seeded Rng (deps.rng) as the 5th argument (D30)
   kb: Knowledge; // S2a
   newBrainState: () => BrainState; // S2b
   /** S2b onBotDeath(s, now, cfg) with cfg and kb closed over by the runtime: record the loss for outcome stats and clear commitment. */
@@ -1583,7 +1583,7 @@ The reflex keeps moving the body until S4 disconnects the bot.
 
 ## 10. Config keys (S1)
 
-`config.combat` (contract writer merges into `Phase3Config` in `src/core/config.ts`; `CombatConfig` = `Phase3Config["combat"]`). S1 owns every key in this table; S2a, S2b and S3 only read them (S2b deletes its duplicate `scanRadius` row).
+`config.combat` (contract writer merges into `Phase3Config` in `src/core/config.ts`). The type of this table is `CombatConfigS1`; `CombatConfig = CombatConfigS1 & CombatConfigS2b & CombatConfigS2a` = `Phase3Config["combat"]` (S2a §9.1, D30). S1 owns every key in this table; S2a, S2b and S3 only read them (S2b deletes its duplicate `scanRadius` row).
 
 | Key | Default | Unit | Meaning |
 |---|---|---|---|

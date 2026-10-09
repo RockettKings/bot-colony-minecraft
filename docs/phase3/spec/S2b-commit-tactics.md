@@ -24,9 +24,9 @@ const valueOf = (kb: Knowledge, typeId: string): number => kb.value(typeId);    
 ```ts
 export interface TerrainFacts {            // computed by B3 from world() with S3 scan helpers, cached <= 20 ticks
   groundFlat: boolean;                     // MOBS "ground_flat"
-  hasCoverWithin8: boolean;
-  hasLowCeilingWithin8: boolean;
-  hasRoofWithin10: boolean;
+  coverWithin8: boolean;
+  lowCeilingWithin8: boolean;
+  roofWithin10: boolean;
 }
 export interface TacticFeedback {          // controller fills from the finished TacticRunner, for ONE pump
   tactic: TacticName;
@@ -394,7 +394,7 @@ export function evalCondition(c: Condition, env: CondEnv): boolean {
 | mob_has_los | `e.lineOfSight` |
 | bot_has_shield | `env.botHasShield` |
 | bot_shield_disabled | `p.shieldDisabled === true` |
-| has_cover_within_8 / has_low_ceiling_within_8 / has_roof_within_10 / ground_flat | `terrain.hasCoverWithin8` / `hasLowCeilingWithin8` / `hasRoofWithin10` / `groundFlat` |
+| has_cover_within_8 / has_low_ceiling_within_8 / has_roof_within_10 / ground_flat | `terrain.coverWithin8` / `lowCeilingWithin8` / `roofWithin10` / `groundFlat` |
 | mob_is_diving | `e.velocity.y < -0.1` and horizontal distance (x,z) from bot to `e.pos` `< 8` |
 | is_daylight / is_thunderstorm | `p.env.isDaylight` / `p.env.thunderstorm` |
 | mob_charged | `e.isCharged` |
@@ -433,9 +433,9 @@ export const TACTIC_FALLBACK: Partial<Record<OptionKind, TacticName>> = {
 | Tactic | Gate |
 |---|---|
 | shield_hold, shield_advance_zigzag, swoop_counter | `env.botHasShield` and `p.shieldDisabled !== true` |
-| break_line_of_sight | `terrain.hasCoverWithin8` |
-| take_cover_overhead | `terrain.hasRoofWithin10` |
-| low_ceiling_fight | `terrain.hasLowCeilingWithin8` |
+| break_line_of_sight | `terrain.coverWithin8` |
+| take_cover_overhead | `terrain.roofWithin10` |
+| low_ceiling_fight | `terrain.lowCeilingWithin8` |
 | knockback_then_retreat | `!e.isCharged` |
 
 Duplicates (same name twice) keep the first. The result is rank-ordered, best first. Melee weapons are not gated (S2a scores `attack` low without one).
