@@ -41,7 +41,7 @@ The Definition of Done list is in section 13. `npm run check` must pass.
  commands → │ commands/parse ─► colony/Colony.handle(event) ─► Effect[]   (owners, home, tasks,    │
             │                                                             dismissed roster)       │
             │ combat/sense.ts   classify(entity, ctx) → Classification, relevance                   │
-            │ combat/brain.ts   decide(percept, brainState, kb, cfg) → { decision, brainState }     │
+            │ combat/brain.ts   decide(percept, state, kb, cfg, rng) → { decision, state }          │
             │ combat/stats.ts   outcome stats + tactic selection                                     │
             │ combat/mobs.ts food.ts values.ts   knowledge base (data)                               │
             │ snapshot/codec.ts snapshot/machine.ts   (pure snapshot model + flow state machines)   │
@@ -87,7 +87,9 @@ All of these live in `src/core/combat/types.ts` or `src/core/snapshot/types.ts`,
 | `LayerKind` | union | `"reflex" \| "combat" \| "task" \| "idle"` | S1 |
 | `OptionKind` | union | `"attack" \| "shield" \| "back_off" \| "retreat" \| "eat" \| "flee" \| "escape_rejoin" \| "resume_task" \| "idle"` | S2 |
 | `Decision` | interface | option, targetId?, tactic?: `TacticName`, foodTypeId?, moveTo?, scores (debug) | S2 |
-| `BrainState` | interface | committed option and until-tick, current tactic, engagement record, provocation memory, `OutcomeStats` | S2 |
+| `BrainState` | interface | committed option and until-tick, current tactic, engagement record, `OutcomeStats` (provocation lives in S1 `ProvocationMemory`, D4) | S2b |
+| `Knowledge`, `Derived` | interfaces | `Knowledge` = `kb.mob/food/value` (D1); `Derived` = the per-pump derived quantities | S2a |
+| `FoodChoice` | interface | `{ typeId, slot, eatTicks, situation, emergency }` returned by `chooseFood` | S2b |
 | `OutcomeStats` | interface | per mob × tactic: n, wins, losses, damageTaken, ticks | S2 |
 | `TacticName` | union | Exactly the snake_case names in MOBS.md §5 | S3 |
 | `BodyActions` | port interface | Primitive actions the combat executor and tactics use (look, move, strafe, sprint, jump, attackTarget with reach/LoS enforced, raiseShield, lowerShield, eat(slot), equip, stopBreaking, sneak) | S3 |
@@ -96,7 +98,7 @@ All of these live in `src/core/combat/types.ts` or `src/core/snapshot/types.ts`,
 | `BotSnapshot`, `SnapItem`, `RestoreToken`, `SnapshotFlowState` | types | Snapshot model and flow states | S4 |
 | `DefendTask` | Task kind `"defend"` | `{ id, kind: "defend", center: Vec3, radius, issuer, createdAt }`: a long-running patrol until stopped | S5 |
 | `ColonyConfig` | interface | Existing colony config, extended by S5 (`statusStaleTicks`, `statusPushTicks`, `flowTimeoutTicks`); `Phase3Config.colony` | S5 |
-| `Phase3Config` | interface | `config.combat`, `config.snapshot`, `config.body`, `config.idle`: every key with default, unit and meaning | Each section lists its own keys; the contract writer merges them into `src/core/config.ts` |
+| `Phase3Config` | interface | `{ combat: CombatConfig; body: BodyConfig; snapshot: SnapshotConfig; idle: IdleConfig; defend: DefendConfig; colony: ColonyConfig }`: every key with default, unit and meaning. `DefendConfig` is S1 §4.4; `ColonyConfig` the keys of S5 §9 | Each section lists its own keys; the contract writer merges them into `src/core/config.ts` |
 
 **Executor contract change (S1 defines it exactly):** `TaskExecutor` gains `pause(now: Tick): void` and `resume(now: Tick): void`.
 - Pause stops all body actions and keeps progress.

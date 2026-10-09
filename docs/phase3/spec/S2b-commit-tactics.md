@@ -154,7 +154,7 @@ export function serializeStats(st: OutcomeStats): string;       // section 6.5
 export function parseStats(json: string | undefined): OutcomeStats;   // never throws; invalid => fresh
 ```
 
-`ControllerDeps.brain` (S1 `BrainFn`, no rng) is bound by the runtime: `(p, s, kb, cfg) => { const r = decide(p, s, kb, cfg, rng); return { decision: r.decision, brainState: r.state }; }` with the runtime's seeded `Rng`. `kb` is S2a's `KNOWLEDGE` (knowledge.ts). `chooseFood` dep: `(sit, self) => chooseFood(sit, self, { objectiveItemIds: [], threats: [], escapeAvailable: true, canEatSafely: true, canEatEmergency: true }, kb, cfg)?.typeId` (used only for RECOVER, where no threat is near, so both guards are true).
+`ControllerDeps.brain` is S1 `BrainFn` = `decide` itself (D30: `(p, s, kb, cfg, rng) => { decision, state }`); the runtime passes its seeded `Rng` as `deps.rng`; no wrapper. `kb` is S2a's `KNOWLEDGE` (knowledge.ts). `chooseFood` dep: `(sit, self) => chooseFood(sit, self, { objectiveItemIds: [], threats: [], escapeAvailable: true, canEatSafely: true, canEatEmergency: true }, kb, cfg)` (returns the `FoodChoice \| undefined` unchanged; S1 reads `.typeId`, `.slot`, `.emergency`, `.eatTicks`; used for RECOVER and the S1 §3.7 signals, where no threat is near, so both guards are true).
 
 ---
 
@@ -334,7 +334,7 @@ Melee threat = `!mobOf(kb, typeId).special.includes("ranged_projectile")`. The e
 
 Shared definitions (`hunger` and `missing` as above; `sat` = `self.saturation`):
 - `held(typeId)` = lowest-slot stack in `self.inventory.foods` with that typeId. The returned `slot` is that stack's slot.
-- `eligible(item)`: `foodOf` exists; `amount >= 1`; `item.typeId` not in `ctx.objectiveItemIds` (waived for `emergency`, `starving`); and `hunger < 20` or typeId in S2a's `ALWAYS_EDIBLE` (imported, not redefined: `golden_apple, enchanted_golden_apple, chorus_fruit, honey_bottle`). If `!self.hungerKnown`, `hunger` is taken as 20 (only always-edible foods are eligible).
+- `eligible(item)`: `foodOf` exists; `amount >= 1`; `item.typeId` not in `ctx.objectiveItemIds` (waived for `emergency`, `starving`); and `hunger < 20` or typeId in S2a's `ALWAYS_EDIBLE` (imported, not redefined: `golden_apple, enchanted_golden_apple, chorus_fruit`; `honey_bottle` follows the normal hunger rule, D20). If `!self.hungerKnown`, `hunger` is taken as 20 (only always-edible foods are eligible).
 - `satGain(f) = min(min(20, hunger + f.hunger), sat + f.saturation) - sat` (TABLES 3).
 - **Never-in-these-tags rule:** `topup` and `pre_engage_heal` ignore items tagged `avoid`, `emergency`, `escape`. `topup` additionally excludes `minecraft:golden_carrot` (TABLES 3.3).
 - **Tie-break for every pick** (after the rule's own keys): lower `valueOf`, then shorter `eatTicks`, then alphabetical typeId.

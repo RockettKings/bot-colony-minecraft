@@ -116,7 +116,13 @@ export interface SnapshotStore {
   /** ColonyMeta (S5 §5) under key `colony:meta`, one JSON string <= chunkChars. */
   readMeta(): ColonyMeta | undefined;
   writeMeta(meta: ColonyMeta): WriteResult;     // reasons: disabled | too_large | engine_error
+  /** Lightweight position track (§6.1a), key `colony:snap:<lower>:pos`. Not part of the commit protocol. Never throws; returns false on failure (logged). */
+  writePos(botName: string, rec: PosRecord): boolean;
+  /** The last position record, or undefined (none or unparsable). Never throws. */
+  readPos(botName: string): PosRecord | undefined;
 }
+/** Where the bot last stood. `tick` is the session tick of the write (comparable only with `takenAtTick` of a snapshot written in the same session). */
+export interface PosRecord { dimensionId: string; pos: Vec3; tick: Tick }
 export class SnapshotStoreError extends Error {}
 ```
 `ColonyMeta` is imported from `../types.js` (S5). `stacks` in `botDismissed.stacks` (S5) = `RosterRecord.stacks` rule above, counted on the snapshot just written.
@@ -251,7 +257,7 @@ export interface PropertyPort {
   totalBytes(): number;
 }
 export interface StoreDeps { port: PropertyPort; cfg: SnapshotStoreConfig; log: (msg: string) => void }   // log prefixes "[colony] "
-export type SnapshotStoreConfig = Pick<Phase3Config["snapshot"], "enabled" | "chunkChars" | "maxTotalChars" | "keyOverheadChars" | "maxStatsChars">;
+export type SnapshotStoreConfig = Pick<Phase3Config["snapshot"], "enabled" | "chunkChars" | "maxTotalChars" | "keyOverheadChars" | "maxStatsChars">;   // writePos/readPos need no extra key
 export function createSnapshotStore(deps: StoreDeps): SnapshotStore;
 ```
 Tests use an in-memory `PropertyPort` (a `Map`); `ids()` returns its keys, `totalBytes()` the sum of key + value lengths.
@@ -263,9 +269,10 @@ Tests use an in-memory `PropertyPort` (a `Map`); `ids()` returns its keys, `tota
 | `colony:snap:<lower>:p` | pointer string (§3.2) | **Commit point.** Names the live seq, chunk count, length, checksum. |
 | `colony:snap:<lower>:<seq>:<i>` | string, <= `chunkChars` | chunk `i` (0-based) of snapshot `seq` |
 | `colony:snap:<lower>:r` | number | highest consumed-or-deleted seq (`restoredSeq`, also the seq high-water mark) |
+| `colony:snap:<lower>:pos` | string `"<dimensionId>\|<x>\|<y>\|<z>\|<tick>"` (x, y, z with 2 decimals) | `PosRecord` (§6.1a); written every `posIntervalTicks` while live; never swept by §4.6 |
 | `colony:meta` | string | `ColonyMeta` JSON (`stableStringify`) |
 
-Example for `Bot-1`, seq 7: `colony:snap:bot-1:p = "1|7|1|455|e70eb27d"`, `colony:snap:bot-1:7:0 = <payload>`, `colony:snap:bot-1:r = 6`. Parse keys with `^colony:snap:([a-z0-9_-]{1,16}):(p|r|(\d+):(\d+))$`. Bot names never contain `:`.
+Example for `Bot-1`, seq 7: `colony:snap:bot-1:p = "1|7|1|455|e70eb27d"`, `colony:snap:bot-1:7:0 = <payload>`, `colony:snap:bot-1:r = 6`. Parse keys with `^colony:snap:([a-z0-9_-]{1,16}):(p|r|pos|(\d+):(\d+))$`. Bot names never contain `:`.
 
 ### 4.3 `write(snap)` (steps in order; the numbers are the failure/crash points)
 
@@ -296,9 +303,10 @@ Budget example (`maxTotalChars 600000`, `keyOverheadChars 64`, payload 455 chars
 
 - `readDetailed(name)`: no pointer (or unparsable) -> `no_snapshot`; `p.seq <= r` -> `consumed`; chunk missing, decode or validate failure -> `snapshot_unreadable` (log `[colony] snapshot unreadable <name> seq <n>: <reason>`). `read` returns `snap` or `undefined`.
 - `markRestored(name, seq)`: require pointer exists and `seq <= p.seq` (else throw). `set(rKey, max(r, seq))`, read it back, throw `SnapshotStoreError` on any failure or mismatch. Calling twice is a no-op.
-- `delete(name)`: if pointer exists, `set(rKey, max(r, p.seq))` first, then delete `:p`, then all chunk keys. Errors are logged. Used when a bot dies (S5 Q7) and by `testReset`.
+- `delete(name)`: if pointer exists, `set(rKey, max(r, p.seq))` first, then delete `:p`, then all chunk keys, then `:pos`. Errors are logged. Used when a bot dies (S5 Q7) and by `testReset`.
 - `listRoster()`: for each `ids()` match of `:p`: `readDetailed`; `ok` -> `RosterRecord`; `snapshot_unreadable` -> `{ botName: lower, seq: p.seq, status: "dismissed", takenAtTick: 0, lastPos: {x:0,y:0,z:0}, dimensionId: "minecraft:overworld", stacks: 0, unreadable: true }`; `consumed` skipped.
 - `writeMeta(meta)`: `s = stableStringify(meta)` (ASCII-escaped); `s.length > cfg.chunkChars` -> `too_large`; `set("colony:meta", s)`. `readMeta` parses and validates `owners` is an object; any failure -> `undefined`.
+- `writePos(name, rec)`: `!cfg.enabled` -> `false` without writing. Else `set(posKey, value)` with `value` = `dimensionId`, `x.toFixed(2)`, `y.toFixed(2)`, `z.toFixed(2)`, `tick` joined by `|`; a throw is logged and returns `false`. `readPos(name)`: split on `|`, 5 fields, numbers finite, else `undefined`.
 - `gcAll()` (extra method on the object returned by `createSnapshotStore`, called once at world load): for every `colony:snap:` key not reachable from a valid pointer (wrong seq, no pointer) delete it, except `:r`.
 
 ### 4.5 Storage-full behaviour (what callers must do)
@@ -327,10 +335,10 @@ export type ClearResult =
   | { ok: false; reason: "mismatch" | "clear_failed"; stuck: SlotKey[] };
 export function clearSnapshotted(bot: SimBot, snap: BotSnapshot): ClearResult;
 
-export interface ApplyOptions { now: Tick; held?: HeldStacks; scanDrops?: boolean; cursor?: ApplyCursor }
-export interface ApplyCursor { next: number; attempts: number; restored: number; relocated: number; skip: SlotKey[]; leftover: SnapStack[]; selected: boolean }
+export interface ApplyOptions { now: Tick; held?: HeldStacks; scanDrops?: boolean; scanCentre?: ScanCentre; cursor?: ApplyCursor }
+export interface ApplyCursor { next: number; attempts: number; restored: number; relocated: number; skip: SlotKey[]; reduce: Partial<Record<SlotKey, number>>; itemsOnGround: number; leftover: SnapStack[]; selected: boolean }
 export type ApplyResult =
-  | { status: "done"; restored: number; relocated: number; leftover: SnapStack[]; skippedAsDropped: number }
+  | { status: "done"; restored: number; relocated: number; leftover: SnapStack[]; skippedAsDropped: number; itemsOnGround: number }
   | { status: "partial"; cursor: ApplyCursor; leftover: SnapStack[]; detail: string }
   | { status: "refused"; reason: "token_mismatch" | "already_applied" | "bot_invalid" | "not_ready" | "scan_unavailable" | "engine_error"; detail: string };
 export function applySnapshot(bot: SimBot, snap: BotSnapshot, token: RestoreToken, opts: ApplyOptions): ApplyResult;
@@ -371,13 +379,13 @@ Module state: `startedTokens: Set<string>` of `${botName.toLowerCase()}:${seq}`.
 Precondition (caller, S4b): `store.markRestored(name, snap.seq)` already returned without throwing, and the bot is valid and `isOnGround`.
 1. `bot.isValid` false -> `refused bot_invalid`. Token's lowercase name or `seq` differs from `snap` -> `refused token_mismatch`.
 2. No `opts.cursor`: `!bot.isOnGround` -> `refused not_ready` (token not started, caller retries next pump); key already in `startedTokens` -> `refused already_applied`. With `opts.cursor`: key must be in `startedTokens`, else `refused already_applied`.
-3. No cursor and `opts.scanDrops && snap.status === "online"` (the status decides, never the restore cause; a `dismissed` or `escaping` snapshot was cleared before `disconnect()`, so it is never scanned): run the drop scan (§6.3). `available:false` -> `refused scan_unavailable` (nothing started). Else `cursor.skip = <matched keys>`. S4b passes `scanDrops = cfg.snapshot.dropsOnDisconnect` for every cause.
+3. No cursor and `opts.scanDrops && snap.status === "online"` (the status decides, never the restore cause; a `dismissed` or `escaping` snapshot was cleared before `disconnect()`, so it is never scanned): run the drop scan (§6.3) with `opts.scanCentre ?? scanCentreOf(snap, undefined)` **in this same synchronous call, before any write** (the body cannot pick anything up between the scan and the first pass). `available:false` -> `refused scan_unavailable` (nothing started). Else `cursor.skip = result.skip`, `cursor.reduce = result.reduce`, `cursor.itemsOnGround = result.matched`. S4b passes `scanDrops = cfg.snapshot.dropsOnDisconnect` for every cause.
 4. Add the key to `startedTokens` (fresh start only). `inv`/`eq` not obtainable on a fresh start -> remove the key again, `refused engine_error`.
 
 ### 5.4 Per-slot cursor loop
 
-`steps = planApplySteps(snap, new Set(opts.held?.keys()), new Set(cursor.skip))`. `cursor` starts `{ next:0, attempts:0, restored:0, relocated:0, skip, leftover:[], selected:false }`. For `i = cursor.next ..`:
-1. `stack = opts.held?.get(key) ?? buildStack(step.stack)`. Held (a real copy taken in this session) always wins: it is lossless. `buildStack` returns `undefined` on failure (§5.5): push `step.stack` to `cursor.leftover`, set `next = i+1`, continue.
+`steps = planApplySteps(snap, new Set(opts.held?.keys()), new Set(cursor.skip))`. `cursor` starts `{ next:0, attempts:0, restored:0, relocated:0, skip, reduce, itemsOnGround, leftover:[], selected:false }` (`skip`, `reduce`, `itemsOnGround` from §5.3 step 3; `[]`, `{}`, `0` without a scan). For `i = cursor.next ..`:
+1. `stack = opts.held?.get(key) ?? buildStack(step.stack)`. Held (a real copy taken in this session) always wins: it is lossless. `buildStack` returns `undefined` on failure (§5.5): push `step.stack` to `cursor.leftover`, set `next = i+1`, continue. If `cursor.reduce[key]` is defined, set `stack.amount = cursor.reduce[key]` (on the copy; `1 <= reduce < step.stack.n`), and a `leftover` push uses `{ ...step.stack, n: reduce }`.
 2. **Inventory key `i<k>`:** `cur = inv.getItem(k)`.
    - `cur` defined and `cursor.attempts > 0 && i === cursor.next` and `sameStack(cur, stack)` (typeId, amount, nameTag): the previous attempt wrote it; count `restored`, no write.
    - `cur` defined otherwise: never overwrite. `e = inv.firstEmptySlot()`; none -> `leftover`; else target `e`, `relocated++`.
@@ -386,7 +394,7 @@ Precondition (caller, S4b): `store.markRestored(name, snap.seq)` already returne
 4. **Carryover key `c<j>`:** place at `inv.firstEmptySlot()`; none -> `leftover`.
 5. Success: `restored++`, `next = i+1`. **Failure (throw/false/readback mismatch):** `attempts++`, return `{status:"partial", cursor, leftover: [...cursor.leftover, ...remaining unwritten step stacks], detail}`. S4b retries after `applyRetryTicks` with `opts.cursor`, at most `applyMaxAttempts` times in total, then reports failure and writes the returned `leftover` into the next checkpoint's `carryover`.
 6. After the last step, if `!cursor.selected`: `bot.selectedSlotIndex = snap.selectedSlot` (failure only logged), `selected = true`.
-7. Return `{status:"done", restored, relocated, leftover: cursor.leftover, skippedAsDropped: cursor.skip.length}`. The key stays in `startedTokens`.
+7. Return `{status:"done", restored, relocated, leftover: cursor.leftover, skippedAsDropped: cursor.skip.length + Object.keys(cursor.reduce).length, itemsOnGround: cursor.itemsOnGround}`. The key stays in `startedTokens`.
 
 Why retries cannot duplicate: `setItem` replaces the slot content, it does not add; relocation only targets empty slots; a retried step first checks whether it already succeeded. `addItem` is never used for restore.
 
@@ -410,6 +418,22 @@ export type DirtyReason = "inventory" | "pickup" | "equip" | "chest" | "spawn" |
 `effectiveInterval = cfg.inventoryEvent === "all" ? cfg.intervalTicks : min(cfg.intervalTicks, cfg.fallbackIntervalTicks)`.
 Skip the write when `contentHashOf(capture.snap)` equals the hash of the last successful write for this bot and `status` is unchanged (nothing to persist; still update `lastWriteTick`).
 
+### 6.1a Position track (drop-scan centre)
+
+A checkpoint's `lastPos` can be `intervalTicks` (200) old; a sprinting bot covers 0.28 x 200 = 56 blocks in that time, so a Save & Quit drop can lie far from it. The writer therefore also keeps a tiny position record per bot:
+- In the same pump loop, for each writable bot: if `now - lastPosWriteTick >= cfg.posIntervalTicks` (20) **and** (the dimension changed or the horizontal distance from the last written pos is >= `cfg.posMinMoveBlocks` (1)), call `store.writePos(name, { dimensionId, pos: bot.location, tick: now })` and set `lastPosWriteTick = now`. Every successful `online` checkpoint write also writes the pos record with the same `lastPos` and `tick = takenAtTick`.
+- Cost: one property of about 40 chars per bot, at most once per second.
+- Staleness bound: the record is at most `posIntervalTicks + 4` ticks (one pump) plus `posMinMoveBlocks` behind the body: `0.28 x 24 + 1 = 7.72` blocks.
+
+```ts
+export interface ScanCentre { dimensionId: string; pos: Vec3 }
+/** Pure. The pos record wins when it is at least as new as the snapshot (same session wrote both); else snap.lastPos. */
+export function scanCentreOf(snap: BotSnapshot, rec: PosRecord | undefined): ScanCentre {
+  return rec !== undefined && rec.tick >= snap.takenAtTick ? { dimensionId: rec.dimensionId, pos: rec.pos } : { dimensionId: snap.dimensionId, pos: snap.lastPos };
+}
+```
+S4b computes `scanCentreOf(snap, store.readPos(name))` once in V2 and uses it for the `lastPos` destination, the V3 wait and `ApplyOptions.scanCentre`.
+
 | Trigger | Marks dirty | Notes |
 |---|---|---|
 | `world.afterEvents.playerInventoryItemChange` (subscribe once, no options; if `event.player.id` is a registered bot id) | `inventory` | Only when `cfg.inventoryEvent === "all"` (probe P5 PASS). Ignore events during that bot's `clearSnapshotted` / `applySnapshot` (set `suppressUntilTick = now + 2` around them). Covers hotbar and main inventory only (`PlayerInventoryType`). |
@@ -429,19 +453,40 @@ Skip the write when `contentHashOf(capture.snap)` equals the hash of the last su
 3. **Save & Quit has no clear step** (the bot is gone before any callback can run, API-MAP §F). Its bodies leave through the same player-removal path as `disconnect()`, which is assumed, not proven.
 4. `exactly once` holds regardless: the consumed seq is persisted before the first `setItem` (D5); `read` never returns it again; a crash mid-restore can lose the unwritten remainder but cannot place anything twice (Q4).
 5. **P4 says items vanish** (`snapshot.dropsOnDisconnect=false`): the checkpoint is the only copy. Restore it as is (`scanDrops: false`).
-6. **P4 says items drop (`true`, the default until P4 runs):** a checkpoint of status `online` restored after the body left without a clear step may duplicate stacks that were dropped on the ground at `lastPos`. Fallback = the drop scan below, run inside `applySnapshot` when S4b passes `scanDrops: true`. The scan runs **for any restore cause** whenever `snap.status === "online"` (D21 H5); the status, not the cause, tells whether the body left without a clear step. It never runs for `dismissed` / `escaping` snapshots.
+6. **P4 says items drop (`true`, the default until P4 runs):** a checkpoint of status `online` restored after the body left without a clear step may duplicate stacks that were dropped on the ground near where the body stood (the scan centre, §6.1a). Fallback = the drop scan below, run inside `applySnapshot` when S4b passes `scanDrops: true`. The scan runs **for any restore cause** whenever `snap.status === "online"` (D21 H5); the status, not the cause, tells whether the body left without a clear step. It never runs for `dismissed` / `escaping` snapshots.
 
 ### 6.3 Drop scan (`scanDroppedItems`, adapter, used by §5.3 step 3)
 
+Rule: **the restore never writes more of an item kind than `snapshot amount - amount found on the ground or already in the new body`.** Matching is by aggregate amount per kind, not by exact stack, because Bedrock merges nearby item entities of one type (two dropped 40-stacks become one 64 and one 16) and a stack can split on pickup.
+
 ```ts
-export type DropScanResult = { available: true; skip: SlotKey[]; matched: number } | { available: false };
-/** `steps` = planApplySteps(snap, new Set(), new Set()); only steps whose key is a SlotKey are considered (carryover `c<n>` steps are never skipped). */
-export function scanDroppedItems(snap: BotSnapshot, steps: readonly ApplyStep[], radius: number): DropScanResult;
+export type DropScanResult =
+  | { available: true; skip: SlotKey[]; reduce: Partial<Record<SlotKey, number>>; matched: number }   // matched = items counted against the snapshot
+  | { available: false };
+/** `steps` = planApplySteps(snap, new Set(), new Set()); only steps whose key is a SlotKey are considered (carryover `c<n>` steps are never skipped or reduced). */
+export function scanDroppedItems(bot: SimBot, snap: BotSnapshot, steps: readonly ApplyStep[], centre: ScanCentre, radius: number): DropScanResult;
+/** True iff every chunk overlapping the square [x - r, x + r] x [z - r, z + r] around `centre` is loaded. */
+export function scanAreaLoaded(centre: ScanCentre, radius: number): boolean;
+/** Session-scoped module state: amount of each item entity already counted by an earlier scan this session. */
+const claimed: Map<string, number> = new Map();   // key: item Entity.id
 ```
-1. `dim = world.getDimension(snap.dimensionId)`. `!dim.isChunkLoaded(snap.lastPos)` -> `{ available: false }` (apply is refused with `scan_unavailable`; S4b must retry later or spawn the bot at `lastPos`, never restore blind).
-2. `ents = dim.getEntities({ type: "minecraft:item", location: snap.lastPos, maxDistance: cfg.reloadDropScanRadius })`; for each valid entity `e.getComponent("minecraft:item")?.itemStack` -> a multiset keyed `typeId|amount|nameTag-or-empty` (the component is not yet in API-MAP; the P4 probe uses the same read, Q7).
-3. Walk the plan steps (no `held`) in order; a step whose key `type|n|name` still has a count in the multiset is added to `skip` and the count is decremented. Skipped stacks stay on the ground (conserved); `ApplyResult.skippedAsDropped` lets S4b tell the owner.
-Example: snapshot has cobblestone x64 (slot 1) and a named sword; the ground has one `cobblestone|64|` entity. Step `i1` matches and is skipped; the sword is restored. If instead the ground held an unrelated 64 cobblestone, that stack is wrongly skipped (accepted false positive, Q4).
+`kindKey(typeId, nameTag)` = `typeId + "|" + (nameTag ?? "")` (durability, enchantments and lore are not compared).
+1. **Area.** `dim = world.getDimension(centre.dimensionId)`. For `cx` from `floor((x - radius) / 16)` to `floor((x + radius) / 16)` and `cz` likewise: `dim.isChunkLoaded({ x: cx * 16 + 8, y: centre.pos.y, z: cz * 16 + 8 })`; any `false` -> `{ available: false }`. A scan never runs on a partly loaded area, because an unloaded chunk hides dropped items. With radius 16 this is at most 3 x 3 chunks.
+2. **Pool.** `pool: Map<kindKey, Array<{ src: string; avail: number }>>`.
+   a. **Already in the new body first** (items it picked up between spawn and apply): for every non-empty inventory slot and equipment slot of `bot`, add `{ src: "body", avail: amount }` under its kind.
+   b. **Ground:** `ents = dim.getEntities({ type: "minecraft:item", location: centre.pos, maxDistance: radius })`, sorted by distance to `centre.pos` ascending, then `id`. For each valid entity: `st = e.getComponent("minecraft:item")?.itemStack` (API-MAP D8); `avail = st.amount - (claimed.get(e.id) ?? 0)`; if `avail > 0` add `{ src: e.id, avail }` under `kindKey(st.typeId, st.nameTag)`.
+3. **Match.** Walk the SlotKey steps in plan order. `want = step.stack.n`; take from the pool entries of `kindKey(step.stack.type, step.stack.name)` in list order until `want` is met or they are empty; each take decrements `avail` and, for a ground entry, adds the amount to `claimed[src]`. `took = step.stack.n - want`:
+   - `took === step.stack.n` -> push `key` to `skip`;
+   - `0 < took < step.stack.n` -> `reduce[key] = step.stack.n - took`;
+   - `matched += took`.
+4. Return `{ available: true, skip, reduce, matched }`. Nothing on the ground is touched: skipped and reduced amounts stay where they are (conserved), or are already in the body.
+
+Why it cannot duplicate within its assumptions: for every kind, `restored = snapshot - min(snapshot, body + ground in radius)`, so `restored + body + ground <= snapshot` whenever all of the bot's dropped items lie inside the radius. The shared `claimed` map makes two bots that dropped the same kind near each other split the ground amount instead of both counting it (which would under-restore). Residual risks are listed in §8 Q4, Q10, Q11.
+
+Example A (merged): snapshot cobblestone 40 in `i1` and 40 in `i5`; ground one 64 entity and one 16 entity. Pool `minecraft:cobblestone|` = 64 + 16 = 80. `i1`: take 40 (from the 64, 24 left), skip. `i5`: take 24 + 16 = 40, skip. `matched = 80`; nothing restored; 80 stay on the ground.
+Example B (partial): snapshot cobblestone 40 in `i1`; ground 30. `i1`: take 30, `reduce.i1 = 10`; the restore writes 10; 40 total exist again (30 ground + 10 body).
+Example C (picked up): the new body already holds iron_ingot 5 when apply starts; snapshot iron_ingot 12 in `i3`; ground 7. Pool = 5 (body) + 7 = 12; `i3` skipped; nothing is written; the body keeps its 5, 7 stay on the ground.
+Example D (unrelated stack): the snapshot has a named sword `Cara`; the ground has an unnamed iron_sword. Kinds differ (`minecraft:iron_sword|Cara` vs `minecraft:iron_sword|`), so the sword is restored.
 
 ## 7. Config keys (S4a)
 
@@ -461,7 +506,9 @@ Added to `config.snapshot` (`Phase3Config`) by the contract writer. Names marked
 | `maxStatsChars` | 8000 | chars | `stats` longer than this is stored as `""` |
 | `applyRetryTicks` | 2 | ticks | Wait before resuming a `partial` apply |
 | `applyMaxAttempts` | 5 | attempts | `cursor.attempts` limit before S4b gives up and writes `leftover` to `carryover` |
-| `reloadDropScanRadius` | 8 | blocks | Radius of the drop scan around `lastPos` |
+| `reloadDropScanRadius` | 16 | blocks | Radius of the drop scan around the scan centre (§6.1a): `ceil(0.28 x (posIntervalTicks + 4) + posMinMoveBlocks) + 8` = 8 + 8, the second 8 for the toss and merge spread of dropped items |
+| `posIntervalTicks` | 20 | ticks | Minimum spacing of position-record writes per bot (§6.1a) |
+| `posMinMoveBlocks` | 1 | blocks | Horizontal move since the last record that triggers a new one |
 
 Constants (not config): `MAX_CHUNKS = 8`, key prefix `colony:snap:`, meta key `colony:meta`.
 
@@ -472,7 +519,9 @@ Constants (not config): `MAX_CHUNKS = 8`, key prefix `colony:snap:`, meta key `c
 | Q1 | Trims and shield banners cannot be detected, so they cannot be excluded. | Serialize the plain item. Kept in-session via `held`; lost only across Save & Quit. Document in PLAYTEST. |
 | Q2 | Do `enchanted_book` stored enchantments appear in `enchantable`? | Excluded for now. A later probe may remove it from `EXCLUDED_EXACT`. |
 | Q3 | Real property size limit (P12 decides `chunkChars`). | 30,000 default; `maxTotalChars` 600,000; payloads are ASCII so chars = bytes. If `getDynamicPropertyTotalByteCount` counts more than chars, lower `maxTotalChars`. |
-| Q4 | Mid-restore crash loses the unwritten remainder; the drop-scan can wrongly skip a coincidental identical stack. | Accepted: both lose or leave items on the ground, never duplicate (ROADMAP: no duplication outranks no loss). A restore is one synchronous call in the normal case. |
+| Q4 | Mid-restore crash loses the unwritten remainder; the drop scan counts any same-kind item in the radius (another player's, another bot's) as the bot's own. | Accepted: both lose or leave items on the ground, never duplicate (ROADMAP: no duplication outranks no loss). The aggregate rule never restores more of a kind than `snapshot - (body + ground in radius)`. A restore is one synchronous call in the normal case. |
+| Q10 | Dropped items outside the scan radius (carried by water, pushed by pistons, or a pos-record write that failed) or picked up by a player before the restore are not seen, so they can still be duplicated. | Accepted residual risk, bounded by the 7.72-block staleness bound and the 16-block radius. A failed `writePos` is logged; the next one fixes it within 20 ticks. Probe P19 (hand-off D32) measures the real Save & Quit behaviour: if items do **not** survive Save & Quit as entities, `dropsOnDisconnect` stays as P4 says but the scan always matches nothing and is harmless. |
+| Q11 | Item entities persist through a reload but keep ageing (6000-tick despawn) only while their chunk is loaded. | No action: a despawned stack was lost by the engine, not duplicated. |
 | Q5 | `SnapshotFailReason` (S5) had no `storage_full`. | RESOLVED (D7): S5 adds `"storage_full"` with message id and text `the colony's save space is full` in S5 §6; S4b maps `WriteFailReason "storage_full"` to it. |
 | Q6 | S6 named the interval `snapshot.timerTicks`; S4a uses `intervalTicks`. | RESOLVED (D6): `snapshot.intervalTicks` everywhere; S6 changes. |
 | Q7 | `EntityItemComponent.itemStack` (d.ts line 12203, map line 3270) is not in API-MAP. | Used only by the drop scan and the P4 probe. The architect adds it to API-MAP. If refused, the scan degrades to counting `minecraft:item` entities (skip `min(count, steps)` stacks of largest amount first). |
@@ -489,3 +538,10 @@ No review files exist for S4a (`docs/phase3/reviews/S4a-snapshot-data--*.md` mat
 - DECISIONS D21 H5: applied. New §5.2a defines `rollbackClearHeld(bot, held, snap): number` (fills only emptied slots, never `addItem`, never touches excluded stacks). §5.3 step 3 and §6.2 item 6 now run the drop scan for any restore cause when `snap.status === "online"` and `scanDrops` is set; never for `dismissed` / `escaping`.
 - DECISIONS D26 (consequence, no S4a row): `pausedTaskId` comment changed to "informational"; the core re-emits `assign` on `botRejoined`, so nothing in S4a/S4b rebuilds a task from the snapshot.
 - DECISIONS D8, D10: not S4a rows (D8: API-MAP row for `EntityItemComponent.itemStack`; D10: S4b flows). Q7 unchanged.
+
+## Revision log (review pass 2, Lead fix 2026-10-09)
+
+- S4a--game-api--p2#1 (merged entities): applied as the aggregate per-kind rule (§6.3), `DropScanResult.reduce`, `ApplyCursor.reduce` / `itemsOnGround`, `ApplyResult.itemsOnGround`, examples A-D.
+- S4a--game-api--p2#2 (radius 8 vs stale `lastPos`): **changed.** Instead of radius 64 around a 200-tick-old position: a position record (`:pos` key, `writePos`/`readPos`, `PosRecord`, §6.1a) written every 20 ticks, `scanCentreOf`, radius 16, whole-area loaded check (`scanAreaLoaded`). Smaller area = fewer false matches and at most 3 x 3 chunks.
+- S4a--game-api--p2#5 (pickup before apply): applied as pool step 2a (items already in the new body count as found) plus "scan and first pass in one synchronous call".
+- New: session-scoped `claimed` ledger so two bots never count the same ground entity. New Q10, Q11. Cross-doc hand-offs recorded as DECISIONS D32 (S4b, S6, API-MAP).

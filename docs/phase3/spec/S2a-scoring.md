@@ -181,7 +181,7 @@ export const SPEED_BY_CLASS: Readonly<Record<MoveSpeed, number>> = { slow: 0.20,
 export const SPEED_OVERRIDE: Readonly<Record<string, number>> = {
   "minecraft:slime": 0.10, "minecraft:magma_cube": 0.10, "minecraft:phantom": 0.45, "minecraft:enderman": 0.60,   // 0.60 includes teleports
 };
-export const ALWAYS_EDIBLE: readonly string[] = ["minecraft:golden_apple", "minecraft:enchanted_golden_apple", "minecraft:chorus_fruit", "minecraft:honey_bottle"];
+export const ALWAYS_EDIBLE: readonly string[] = ["minecraft:golden_apple", "minecraft:enchanted_golden_apple", "minecraft:chorus_fruit"];   // D20: honey_bottle follows the normal hunger rule (not always edible)
 export const EMERGENCY_FOODS: readonly string[] = ["minecraft:enchanted_golden_apple", "minecraft:golden_apple"];   // S2b 5.2 order
 export const ATTACK_NEAR_BLOCKS = 3.5;                // S1 L1
 // Named literals of the formulas below. They are NOT config keys; change them here only.

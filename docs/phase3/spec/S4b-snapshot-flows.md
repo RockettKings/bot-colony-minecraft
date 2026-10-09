@@ -28,7 +28,7 @@ S4a (`S4a-snapshot-data.md`) owns *what* `captureSnapshot`, `applySnapshot`, `Sn
 export interface SnapshotService {
   /** S1 SnapshotHandle. Returns true = a flow was registered and will run on this pump; false = refused (see §5.1). */
   requestEscape(botId: BotId, now: Tick, carry: () => ControllerCarry): boolean;
-  abortEscape(botId: BotId, reason: "bot_died" | "disposed"): void;
+  abortEscape(botId: BotId, reason: "bot_died" | "disposed" | "timeout"): void;   // §5.1a; "timeout" = S1 handoffTimeoutTicks
   /** Colony effects (runtime routes them). */
   onDismissBot(e: Extract<Effect, { kind: "dismissBot" }>, now: Tick): void;
   onSummonBot(e: Extract<Effect, { kind: "summonBot" }>, now: Tick): void;
@@ -90,6 +90,7 @@ export interface BotDirectory {
   /** Create the controller + BotEntry for a respawned body. init undefined = fresh idle controller; with init.carry = RECOVER start (S1 §3.6). No task travels in the carry (D26). */
   registerRejoined(bot: SimBot, init: ControllerInit | undefined, now: Tick): BotId;
   adopt(bot: SimBot): BotId;                                    // body already alive (script reload): Phase 1 adopt path
+  setFlowActive(botId: BotId, on: boolean): void;               // BotController.setFlowActive (S1 §2.2): suspends/resumes the EquipmentManager; see §2.5
   lastActiveTick(botId: BotId): Tick;                           // last tick the layer was not "idle" or a task was assigned
 }
 ```
@@ -234,6 +235,11 @@ Bot `Bot-1` has: sword in slot 0, 64 cobblestone in slot 1, a `minecraft:white_s
 4. 48004: `isValid` false -> G1 -> `botDismissed { cause:"command", stacks:3 }`. Core replies `Dismissed Bot-1 (3 stacks saved). Type !summon Bot-1 to bring it back.`; owner sees `Dropped 1 item I can't carry offline at 100 64 -21.`
 Time used: 4 ticks of a 500-tick deadline.
 
+
+### 2.5 Equipment suspension during a LEAVE flow (D31)
+
+`directory.setFlowActive(botId, true)` is called when a LEAVE flow is created (rows L2 and the idle/far creation rows, and E4 for escape). `directory.setFlowActive(botId, false)` is called at every flow end that leaves the controller alive: refusals and failures (P1, P6, W1, W5, D4 and every other row ending in `end` without a commit), `abortEscape`, and a takeover. After a commit the controller is disposed, which clears it implicitly. RESTORE flows make no call: no controller exists until LV1 registers the bot. Purpose: the EquipmentManager must not swap armour or the offhand between the capture and the commit, which would change the slot set and trip `mismatch`.
+
 ## 3. Rejoin and summon (the RESTORE machine)
 
 Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `summon`), a finished escape commit (cause `escape`: C11 creates the `RestoreFlow` in state `resolve` with `oldBotId`, `carry` and `notBefore = now + snapshot.respawnDelayTicks`), or the world-load queue (causes `reload`, `owner_returned`, §6).
@@ -246,8 +252,8 @@ Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `sum
 | R1 | (none) | `summonBot` | `!cfg.enabled` | `botRejoinFailed { reason:"error" }` | end |
 | R2 | (none) | `summonBot` | else | `RestoreFlow{cause:"summon", summonNear:{pos:near, dimensionId}}`, `notBefore = now` | resolve |
 | V1 | resolve | pump | `store.readDetailed(name)` not ok | `botRejoinFailed { reason: mapReadFail(reason) }` | end |
-| V2 | resolve | pump | snapshot ok | `seq = snap.seq`; `dests = §3.2`; keep `snap` in `RestoreRun` (§8.1); `dests` empty -> `botRejoinFailed { reason: cause==="escape"||cause==="reload"||cause==="owner_returned" ? "owner_offline" : "spawn_failed" }` | name_wait |
-| V3 | resolve | `snap.status === "online"` and `cfg.dropsOnDisconnect` | `!engine.isChunkLoaded(snap.dimensionId, snap.lastPos)` | wait; every `scanRetryTicks` (20) recheck; after `scanDeferMaxTicks` (1200): `botRejoinFailed { reason:"error" }` (snapshot untouched, "Its items are kept.") | resolve (waiting) |
+| V2 | resolve | pump | snapshot ok | `seq = snap.seq`; `centre = scanCentreOf(snap, store.readPos(name))` (S4a §6.1a); `dests = §3.2`; keep `snap` in `RestoreRun` (§8.1); `dests` empty -> `botRejoinFailed { reason: cause==="escape"||cause==="reload"||cause==="owner_returned" ? "owner_offline" : "spawn_failed" }` | name_wait |
+| V3 | resolve | `snap.status === "online"` and `cfg.dropsOnDisconnect` | `!scanAreaLoaded(centre, cfg.snapshot.reloadDropScanRadius)` (S4a §6.3 step 1: every chunk of the scan square) | wait; every `scanRetryTicks` (20) recheck; after `scanDeferMaxTicks` (1200): `botRejoinFailed { reason:"error" }` (snapshot untouched, "Its items are kept.") | resolve (waiting) |
 | N1 | name_wait | pump | `playersNamed(name)` empty and `now >= notBefore` | none | spawn |
 | N2 | name_wait | pump | a player named `name` exists, it is a SimulatedPlayer, cause in (`reload`, `owner_returned`) | script reload left the body alive: `directory.adopt(bot)` (items are in that body); no restore; flow ends | end |
 | N3 | name_wait | `now - stateSince >= snapshot.nameFreeWaitTicks` (40) | a player still named `name` | `botRejoinFailed { reason:"name_in_use" }` | end |
@@ -261,7 +267,7 @@ Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `sum
 | M1 | mark | pump | `store.markRestored(name, seq)` returns | create `RestoreToken` (§8.1) | apply |
 | M2 | mark | `markRestored` threw | `markAttempts < 3` | retry next pump | mark |
 | M3 | mark | threw 3 times | none | `engine.disconnect(bot)`; `botRejoinFailed { reason:"error" }`; snapshot still unconsumed | end |
-| A1 | apply | pump | `applySnapshot(bot, snap, token, {now, held, scanDrops, cursor})` -> `done` | `stacks = stacksOf(snap)`; `leftover = result.leftover` | haul_drop (escape with haul, §7) else live |
+| A1 | apply | pump | `applySnapshot(bot, snap, token, {now, held, scanDrops, scanCentre: centre, cursor})` -> `done` | `stacks = stacksOf(snap)`; `leftover = result.leftover` | haul_drop (escape with haul, §7) else live |
 | A2 | apply | `partial` | `applyAttempts < applyMaxAttempts` (5) | `cursor = result.cursor`; wait `applyRetryTicks` (2) | apply |
 | A3 | apply | `partial` | attempts exhausted | `leftover = result.leftover` (all unplaced stacks) | live (with carryover) |
 | A4 | apply | `refused not_ready` | within `groundWaitTicks` | retry next pump | apply |
@@ -270,7 +276,7 @@ Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `sum
 | HD1 | haul_drop | see §7 | | | haul_away / live |
 | LV1 | live | entered | none | register + checkpoint + events, exact order of §3.3 | end |
 
-`scanDrops` in A1 = `cfg.snapshot.dropsOnDisconnect` for **every** cause; `applySnapshot` itself runs the drop scan only when `snap.status === "online"` (S4a §5.3 step 3 and §6.2 item 6, H5: the status, not the cause, tells whether the body left without a clear step). V3 and A5 wait on the same condition (`dropsOnDisconnect` and `status === "online"`). When `result.skippedAsDropped > 0` the service logs `[colony] <name>: <n> stacks left on the ground (drop scan)`; the stacks stay on the ground (conserved).
+`scanDrops` in A1 = `cfg.snapshot.dropsOnDisconnect` for **every** cause; `applySnapshot` itself runs the drop scan only when `snap.status === "online"` (S4a §5.3 step 3 and §6.2 item 6, H5: the status, not the cause, tells whether the body left without a clear step). V3 and A5 wait on the same condition (`dropsOnDisconnect` and `status === "online"`). When `result.itemsOnGround > 0` the service logs `[colony] <name>: <itemsOnGround> items found on the ground or in the new body (drop scan), <skippedAsDropped> slots skipped or reduced`; the stacks stay on the ground (conserved).
 
 ### 3.2 Destinations (`destOrder`, resolved in V2)
 
@@ -278,8 +284,10 @@ Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `sum
 |---|---|---|
 | `summoner` | `summonBot.near` / `dimensionId` | chunk loaded and a spawn cell exists |
 | `home` | `colony.home()` | same |
-| `owner` | `snap.owner` (else the first online human, sorted by name) found in `engine.humans()`; pos = `floor` of the owner's feet, their dimension | owner online, chunk loaded, spawn cell exists |
-| `lastPos` | `snap.lastPos`, `snap.dimensionId` | same |
+| `owner` | the **effective owner** (below); pos = `floor` of their feet, their dimension | effective owner defined, chunk loaded, spawn cell exists |
+| `lastPos` | `centre.pos`, `centre.dimensionId` (= `scanCentreOf`, the fresher of the pos record and `snap.lastPos`) | same |
+
+**Effective owner** (the one definition; E3 and W3 use it). If the bot has an owner (`snap.owner`, or `colony.ownerOf(botId)` for a live bot), the effective owner is that player and no one else: if they are not in `engine.humans()` the owner destination is unavailable (`owner_offline`). If the bot has **no** owner (a GameTest-spawned bot), the effective owner is the first element of `engine.humans()` sorted by lowercase name (ordinal), or none when no human is online. A bot is never sent to a stranger's feet because its owner is offline (ROADMAP: "Owner offline and no home: stays dismissed").
 
 Spawn cell search (`findSpawnCell`, adapter, pure scan with `blockAt`): candidate cells are the column of `near` and the cells within `snapshot.spawnSearchRadius` (2) horizontally, ordered by Chebyshev distance then by `|dy|` ascending, `dy` in `-4..+4` (`snapshot.spawnSearchDy`). A cell is safe when the feet and head blocks are air (not liquid), the block below is solid and not liquid, and none of feet, head, below has typeId in {`minecraft:lava`, `minecraft:water`, `minecraft:fire`, `minecraft:magma`, `minecraft:cactus`, `minecraft:campfire`, `minecraft:soul_campfire`, `minecraft:sweet_berry_bush`, `minecraft:powder_snow`}. Result feet = `(cx + 0.5, cy, cz + 0.5)`.
 
@@ -338,10 +346,14 @@ Returns synchronously; the work happens in `pump` of the same tick. Checks in or
 |---|---|---|
 | E1 | `cfg.snapshot.enabled && cfg.snapshot.sameNameRespawn` | return false (log once per 1200 ticks) |
 | E2 | no flow for the bot's name; body valid | return false |
-| E3 | `dest`: `colony.home()` defined and `isChunkLoaded(home)` -> `"home"`; else the owner (`colony.ownerOf(botId)`, else the first online human) is in `engine.humans()` and their chunk is loaded -> `"owner"` | return false and `emit botNotice { name, botId, notice: { id: "escapeBlocked" } }` (the controller then waits `combat.escapeRetryTicks`, so at most one notice per 200 ticks) |
+| E3 | `dest`: `colony.home()` defined and `isChunkLoaded(home)` -> `"home"`; else the effective owner (§3.2) is defined and their chunk is loaded -> `"owner"` | return false and `emit botNotice { name, botId, notice: { id: "escapeBlocked" } }` (the controller then waits `combat.escapeRetryTicks`, so at most one notice per 200 ticks) |
 | E4 | none | register `LeaveFlow{kind:"escape", carry, dest}`; return true |
 
 **No cooldown:** the service stores no "last escape" tick. A bot that has just rejoined may escape again on its next pump (its new controller has `escapeBlockedUntil = 0`). The only throttle is the controller's `escapeRetryTicks` after a *refusal*.
+
+### 5.1a `abortEscape(botId, reason)`
+
+Removes the bot's `LeaveFlow` of kind `escape` if it is in `prep`, `walk`, `put` or `drop` (any state before `commit`), calls `directory.setFlowActive(botId, false)` and logs `[colony] escape aborted (<reason>)`. No chat notice: S1 `failEscape` handles the retry through `escapeRetryTicks`. In `commit` or later it is a no-op (the commit is synchronous and never pending across pumps). With no escape flow for the bot it is a no-op; a second call is a no-op. For `"timeout"` the bot stays live and may request a new escape on its next pump.
 
 ### 5.2 Order of operations (maps to table rows)
 
@@ -387,7 +399,7 @@ Per queued row, at most one flow start per `snapshot.rejoinStaggerTicks` (8 tick
 |---|---|---|
 | W1 | a flow exists for the name, or `restoredSeqs` has `name:seq` | drop the row |
 | W2 | name online as a SimulatedPlayer (`/reload` of scripts left bodies alive) | `directory.adopt(bot)`; drop the row; the next checkpoint overwrites the stale seq (rows N2 / `markDirty "spawn"`) |
-| W3 | `canRejoin(row)`: the effective owner is online (`row.owner` in `engine.humans()`, else any human when the row has no owner) **or** `colony.home()` is defined | start `RestoreFlow{cause: now <= reloadWindowEnd ? "reload" : "owner_returned"}` |
+| W3 | `canRejoin(row)`: the effective owner (§3.2, from `row.owner`) is defined **or** `colony.home()` is defined | start `RestoreFlow{cause: now <= reloadWindowEnd ? "reload" : "owner_returned"}` |
 | W4 | else | keep the row; once, after `snapshot.deferNoticeTicks` (200) since world load, `emit botNotice { name, notice: { id: "rejoinDeferred", owner: row.owner } }` (colony voice, S5 §6) |
 
 ### 6.3 Owner returns
@@ -423,6 +435,7 @@ Example: gather 16 oak_log, `progress = {delivered: 3, held: 12}`, no home, owne
 ```ts
 interface RestoreRun {                         // service memory only, key = lowercase name; at most one per name
   snap: BotSnapshot;                           // decoded BEFORE markRestored; the store will not return it afterwards
+  centre: ScanCentre;                          // S4a §6.1a, computed once in V2; spawn destination `lastPos`, V3 wait and drop scan
   token: RestoreToken;                         // makeRestoreToken(snap, `${snap.botName}:${snap.seq}:${now}`, now)
   markedAt?: Tick;
   started: boolean;                            // true after applySnapshot returned anything but "refused"
@@ -485,7 +498,7 @@ Reasons are `SnapshotFailReason` (S5 §5 plus `storage_full`, D7). "Notice" = `b
 | F2 | `applySnapshot` throws a slot write | A2, A3 | `partial`: resume with the cursor every 2 ticks, max 5 attempts; then leftover to `carryover`, bot goes live | notice `restoreLeftover { count }` |
 | F3 | `applySnapshot` `refused` (`bot_invalid`, `engine_error`, `token_mismatch`, `already_applied`) | A6 | Not started: re-arm (§8.3), disconnect the empty body, `botRejoinFailed { reason: "error" }`. `already_applied` after a service bug: treat as `done` with a log line | `summonFailed` / `rejoinFailed`, "something went wrong" |
 | F4 | `refused not_ready` | A4 | Retry next pump, bounded by `groundWaitTicks` (60) | none |
-| F5 | `refused scan_unavailable` (P4 says drops; `lastPos` chunk unloaded) | V3, A5 | Wait, recheck every 20 ticks up to `scanDeferMaxTicks` (1200); then `botRejoinFailed { reason: "error" }`; snapshot untouched. Never restore blind | `rejoinFailed` / `summonFailed` |
+| F5 | `refused scan_unavailable` (P4 says drops; a chunk of the scan square around `centre` unloaded) | V3, A5 | Wait, recheck every 20 ticks up to `scanDeferMaxTicks` (1200); then `botRejoinFailed { reason: "error" }`; snapshot untouched. Never restore blind | `rejoinFailed` / `summonFailed` |
 | F6 | Chest full while depositing | T2 | Notice once; remainder: command and escape drop it (+ `excludedDropped`); idle and far refuse (cargo only: stays in the snapshot) | `chestFull`; `excludedDropped(count, pos)` |
 | F7 | Chest unreachable (not set, other dimension, unloaded, no path, > 48 blocks) | P4, P6, W4, W5 | command, escape: drop excluded; idle, far: refuse and back off 1200 ticks | `excludedDropped` (command, escape) |
 | F8 | Storage full (`write` -> `storage_full`) | C4 | Body not cleared. command: `botDismissFailed { reason: "storage_full" }`; escape: `onEscapeFailed` (controller backs off 200 ticks, fights on); idle/far: silent, back off. Checkpoints: S4a §4.5 (log once per 1200 ticks) | `dismissFailed(bot, "the colony's save space is full")` |
@@ -588,6 +601,7 @@ Pass conditions (final): `fp1 === fingerprintLast`; home distance <= 3; exactly 
 
 ### 12.3 Service unit cases to add to TC-B4 (FakeSnapshotEngine, FakeClock; each is a failure-table row)
 
+U16 `abortEscape(botId, "timeout")` while the escape flow is in `walk`: the flow is removed, `setFlowActive(false)` is called once, and the next `requestEscape` for the bot returns true. U17 L2 then a P1 failure: `setFlowActive` true then false, in that order. U18 effective owner: a bot with an offline owner and no home gets `owner_offline` even when another human is online; an ownerless bot uses the first human by lowercase name.
 U1 commit order spy: write, readDetailed, clear, disconnect, dispose in that order (and none after a failed write). U2 two `summonBot` effects in one pump: one spawn, second `busy`. U3 `markRestored` called before the first `setItem` (spy order). U4 spawn throws twice then succeeds: one body. U5 spawn throws but a body appeared: adopted, no second spawn. U6 `apply` partial x2 then done: `setItem` count equals plan length. U7 partial x5: `carryover` in the forced write, notice `restoreLeftover`. U8 re-arm after `bot_invalid`. U9 idle with excluded and no chest: refused, backoff 1200. U10 `assign` during idle walk aborts the flow. U11 world load: dismissed row not queued; `online` row queued; owner offline + no home: `rejoinDeferred` after 200 ticks. U12 haul: only objective slots dropped, `haulDropped.count` right. U13 `storage_full`: body untouched, `botDismissFailed` reason `storage_full`. U14 escape with `dropsOnDisconnect=true`: no item on the fake ground after the flow. U15 scripted reload with a live body: adopt, no restore.
 
 ## 13. Config keys (S4b)
@@ -665,3 +679,8 @@ No review files exist for S4b (`docs/phase3/reviews/S4b-snapshot-flows--*.md` ma
 - DECISIONS D26: applied. `ControllerCarry` is now `{ brainState, recover, objectiveItemIds?, stats? }` (no `task`, no `progress`); `ControllerInit = { carry?, stats? }`; `registerRejoined` takes `ControllerInit`. §3.3 step 1, §5.2 steps 10-11 and the controller hand-off paragraph, §7 trigger (now `carry.objectiveItemIds` non-empty, no task kind), §11.3 escape row, A9 and the §7 core-accounting note changed: the core re-emits `assign` on `botRejoined`; the controller creates the executor paused in the recover layer (H4).
 - Names matched to S4a: engine port member `rollbackClear` renamed `rollbackClearHeld` (S4a §5.2a); §1.5 now points to S4a instead of requesting it; `C1 pausedTaskId` uses `directory.taskIdOf(botId)` (the carry has no task); `scanDrops = cfg.snapshot.dropsOnDisconnect` for every cause, S4a decides by `snap.status === "online"` (A1 note); `skippedAsDropped` is logged; `DirtyReason` and `scanDroppedItems` are now defined by S4a.
 - DECISIONS D6, D7, D9: already followed in this file (`intervalTicks`, `storage_full`, S4a helpers); header sentence extended, no other change.
+
+## Revision log (review pass 2, Lead fix 2026-10-09)
+
+- Drop-scan fix (S4a--game-api--p2#1, #2, #5; DECISIONS D32): V2 computes `centre = scanCentreOf(...)`; V3 waits on `scanAreaLoaded(centre, radius)`; A1 passes `scanCentre`; the `lastPos` destination uses `centre`; the log line reports `itemsOnGround`; F5 wording.
+- D31 (S4b items): `abortEscape` takes `"timeout"` (§5.1a, U16); `BotDirectory.setFlowActive` and §2.5 call sites (U17); one effective-owner definition in §3.2 used by E3 and W3 (U18).
