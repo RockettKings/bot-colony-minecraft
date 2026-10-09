@@ -18,7 +18,7 @@ Names are fixed by `docs/PHASE3-SPEC.md` §4. Where this file adds a name, it sa
 | Eating | `body/eating.ts` | same | B5 |
 | Equipment | `body/equipment-logic.ts` (pure), `body/equipment.ts` (manager) | same | B5 |
 | Probes | `src/probes/combat/*.ts` | gametest allowed | B5 |
-| Tests | `test/body-*.test.ts` (list in §9) | fakes | B5 |
+| Tests | `test/body-*.test.ts`, `test/adapter-body.test.ts`, `test/probes-combat.test.ts` (list in §9) | fakes | B5 |
 
 Hard rules for B5:
 - Every engine call is inside `adapter/body.ts`, wrapped in `try/catch`, logged with `[colony]` via `rateLimitedLogger(`${name}.body.`)` (from `adapter/world.ts`; 1st failure then every 25th). The port method returns its documented failure value; an engine error never escapes.
@@ -211,9 +211,9 @@ export function initBodyEvents(): void;
 ### 1.2 `attackTarget(entityId)` exact algorithm
 
 Per-bot state in the closure: `lastAttackTick = -1000`. Steps, first failing step returns:
-1. `p.isValid` false → `"invalid"`.
+1. `p.isValid` false, or `config.body.attackMode === "off"` → `"invalid"` (with `"off"` the method is a no-op: nothing is attacked and S1's `attackAllowed` returns false).
 2. `target = world.getEntity(entityId)` in `try`; throws/undefined/`!target.isValid` → `"invalid"`.
-3. **Never-target (defence in depth, the brain also filters):** `target.typeId` in `{minecraft:player, minecraft:villager, minecraft:villager_v2, minecraft:wandering_trader, minecraft:iron_golem, minecraft:snow_golem, minecraft:copper_golem, minecraft:allay, minecraft:npc, minecraft:armor_stand}` or tamed (`hasComponent('minecraft:is_tamed')` or `getComponent('minecraft:tameable')?.isTamed`) → `"invalid"` and log once per type.
+3. **Never-target (defence in depth, the brain also filters; exact test order):** if `entityId === p.id`, or `target.typeId` in `{minecraft:player, minecraft:villager, minecraft:villager_v2, minecraft:wandering_trader, minecraft:iron_golem, minecraft:snow_golem, minecraft:copper_golem, minecraft:allay, minecraft:npc, minecraft:armor_stand}` or tamed (`hasComponent('minecraft:is_tamed')` or `getComponent('minecraft:tameable')?.isTamed`) → `"invalid"` and log once per type.
 4. `now - lastAttackTick < config.body.attackIntervalTicks` → `"cooldown"`.
 5. **Reach:** `eye = p.getHeadLocation()`, `box = target.getAABB()`. `reachDistance(eye, box) = sqrt(Σ over axes of max(|eye_a − center_a| − extent_a, 0)²)`. If `> config.body.meleeReach` (3.0) → `"out_of_reach"`.
 6. **Line of sight** (two rays, both from `eye`, `BlockRaycastOptions { maxDistance: len, includeLiquidBlocks: false, includePassableBlocks: false }`, API-MAP §A8):
@@ -230,11 +230,12 @@ Effective attack spacing: runners are stepped every 4 ticks, so the real minimum
 
 ### 1.3 Other adapter algorithms
 
-**`setSprinting(on)`**: `on=false`: `p.isSprinting=false; return false`. `on=true`: return false if `self.hunger < sprintMinHunger (7)` (TABLES §1: sprint only if hunger > 6), or `shieldState() !== "down"`, or eating, or `p.isInWater`. Else write `true`, `p.isSneaking = false` first if it was true (but only when the shield is down, already checked), read back, return the read-back value.
+**`setSprinting(on)`**: `on=false`: `p.isSprinting=false; return false`. `on=true`: return false if `config.body.sprintEnabled` is false, or `self.hunger < sprintMinHunger (7)` (TABLES §1: sprint only if hunger > 6), or `shieldState() !== "down"`, or eating, or `p.isInWater`. Else write `true`, `p.isSneaking = false` first if it was true (but only when the shield is down, already checked), read back, return the read-back value.
 
 **`jump()`**: refuses while eating or while the shield is up in `use_item` mode; otherwise as in the table.
 
 **`dropSlot(slot)`** (used by S4 for "drop items at the owner's feet"; one call = one drop; S4 loops once per pump until the slot is empty):
+0. `config.body.dropEnabled` false → return 0 (the call is disabled).
 1. `c = inventory container`; `s0 = c.getItem(slot)`; none → return 0. `before = s0.amount`.
 2. If `slot >= 9`: `scratch = config.body.dropScratchSlot (8)`; `c.swapItems(slot, scratch, c)` (engine swap, conserving) and remember to swap back. Else `scratch = slot`.
 3. `prev = p.selectedSlotIndex`; `p.selectedSlotIndex = scratch`; `ok = p.dropSelectedItem()`; `p.selectedSlotIndex = prev`.
@@ -548,10 +549,10 @@ export function hasGround(world: WorldPort, cell: Vec3, depth: number): boolean;
 /** true if any cell with Chebyshev distance 1..`radius` from `pos` (same y) has no solid block within `depth` cells below
  *  (a drop). For radius 2 that is 8 + 16 = 24 cells. Used as the "do not fight next to a drop" rule. */
 export function dropNear(world: WorldPort, pos: Vec3, radius: number, depth: number): boolean;
-/** true if the cells from `from` along unit direction `dir` for `len` blocks (step 1) are each standable, allowing
- *  ±1 vertical step. Returns the number of consecutive good blocks (0..len). */
 /** true if some block at (cell.x, cell.y + k, cell.z), k = 2..6, is solid. Used by swoop_counter, take_cover_overhead and findRoof. */
 export function roofed(world: WorldPort, cell: Vec3): boolean;
+/** Walks the cells from `from` along unit direction `dir` for `len` blocks (step 1); each must be standable, allowing
+ *  ±1 vertical step. Returns the number of consecutive good blocks (0..len). */
 export function freeRun(world: WorldPort, from: Vec3, dir: { x: number; z: number }, len: number): number;
 ```
 Cell = integer block coords (`Math.floor`). A "cell centre" = `x+0.5, y, z+0.5`. Every function that reads blocks counts calls against an optional `budget: { left: number }` argument; when `left` hits 0 it stops and returns its best partial result (scans below).
@@ -901,7 +902,7 @@ export interface EquipState {
   cfg: BodyConfig;
   selectedSlot: number;
 }
-// AskNeed is defined once in `core/types.ts` (S5 §6, with BotNotice) and imported here:
+// AskNeed is defined once in `core/types.ts` (S5 §5, with BotNotice; rendered by S5 §6) and imported here:
 //   export type AskNeed = "weapon" | "shield" | "helmet" | "chestplate" | "leggings" | "boots" | "food";
 export type EquipAction =
   | { kind: "equip"; fromSlot: number; to: EquipSlotName; why: string }
@@ -977,6 +978,7 @@ export class EquipmentManager {
 - `ensureWeaponSelected()` is called by the combat executor before starting any melee tactic and after eating; it only does `selectSlot` (and a `hotbar_swap` if the chosen weapon is outside the hotbar).
 
 **Execution of one action:** `equip` → `body.equipFromSlot(fromSlot, to)`; `hotbar_swap` → `body.swapSlots(a, b)`; `select` → `body.selectSlot(slot)`; `fetch` → `worker.withdrawSlot(chest, chestSlot, 1)` only if `nearContainer(S.pos, chest.pos)` (same limits as `withinContainerReach`: horizontal `DEFAULT_GATHER_CONFIG.containerReach` 2.5, `|dy| <= 2`, imported from `../executor.js`) and `inventory` has a free slot; `ask` → `ask(...)`. After every mutating success: `onChanged()`, and the next pump re-plans (dirty = true) so the result is verified against the real inventory.
+If a `hotbar_swap` that moves the chosen weapon into `cfg.weaponSlot` returns false (no empty slot and the selected slot holds a non-equipment item, swap refused), the following `select` is skipped, `ensureWeaponSelected()` returns false, and the manager logs `[colony] equip hotbar_swap failed (no_slot)`; tactics then run as unarmed (§3.2 `W`).
 A failed action (returns false) is not retried for `cfg.equipRetryTicks` (200) and is logged `[colony] equip <action> failed`.
 
 **Durability swap rule (explicit):** the plan replaces a worn/selected item as soon as `low(item)` (`remaining <= 5` points OR `frac <= 0.10`) and a `usable` replacement exists in the inventory or (when adjacent) the colony chest. Because `periodic` runs every 600 ticks and `fight_end` after each fight, a weapon dropping below the threshold mid-fight is caught within one fight at most; the combat executor also calls `markDirty("fight_end")` every 400 ticks of continuous fighting.
@@ -1045,11 +1047,9 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 | `sprintMinHunger` | 7 | hunger points | sprint allowed at hunger >= this (TABLES) |
 | `relativeMoveMethod` | `"relative"` | `"relative"\|"move_to"` | strafe/back-off implementation (P10) |
 | `strafeLeftSign` | 1 | ±1 | sign of `moveRelative(leftRight)` that means left (P10) |
-| `hissProxyEnabled` | true | bool | creeper hissing = within `hissProxyDist` until P7 passes |
-| `hissProxyDist` | 3 | blocks | proxy distance |
 | `eatEnabled` | true | bool | false disables eating (P2) |
 | `allowManualEat` | false | bool | `Player.eatItem` fallback; needs player approval, not implemented in Phase 3 |
-| `eatTicksByType` | `{ dried_kelp: 16, honey_bottle: 40 }` (others 32) | ticks | eat duration overrides (TABLES §1) |
+| `eatTicksByType` | `{ "minecraft:dried_kelp": 16, "minecraft:honey_bottle": 40 }` (others 32) | ticks | eat duration overrides, keyed by the full typeId with the `minecraft:` prefix (TABLES §1); lookup `eatTicksByType[typeId] ?? 32` |
 | `eatTimeoutExtraTicks` | 10 | ticks | wait beyond `eatTicks` before giving up |
 | `eatHardMinThreatDist` | 4 | blocks | never start eating with a threat closer (normal mode) |
 | `eatAbortDist` | 3.5 | blocks | abort an eat when a threat with LOS gets this close (normal mode) |
@@ -1064,7 +1064,7 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 | `upgradeMinGainArmor` | 1.0 | armour score | min score gain to swap a usable piece for a better one |
 | `upgradeMinGainWeapon` | 1.0 | damage | min damage gain to switch weapons |
 | `chestFetchMaxPerVisit` | 3 | count | max items taken from the colony chest per visit |
-| `askCooldownTicks` | 6000 | ticks | per bot, per need, min gap between chat asks |
+| `askCooldownTicks` | 6000 | ticks | per bot, per need, min gap between `equipNeed` notices |
 | `askGlobalGapTicks` | 600 | ticks | per bot, min gap between any two asks |
 | `askForMissingGear` | false | bool | also ask when a never-owned shield/armour piece is missing |
 | `scanBlockBudget` | 1500 | blockAt calls | per scan (cover, ceiling, roof, flee direction) |
@@ -1074,9 +1074,9 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 | `edgeCheckRadius` | 2 | blocks | `dropNear` radius |
 | `edgeDepth` | 3 | blocks | a drop is "no ground within this many blocks below" |
 | `tacticTimeoutTicks` | 600 | ticks | default cap for a tactic |
-| `tacticNoProgressTicks` | 120 | ticks | melee_crit: no hit for this long fails |
+| `tacticNoProgressTicks` | 120 | ticks | melee_crit and melee_strafe: no hit for this long fails |
 | `fleeDefaultHp` | 8 | HP | `signals.fleeHp` when the entry has no `hp_below` |
-| `creeperRetreatDist` | 7 | blocks | knockback_then_retreat: required distance before the next cycle |
+| `creeperRetreatDist` | 6 | blocks | knockback_then_retreat: distance at which RETREAT ends (the retreat point itself needs 7+ blocks of free run) |
 | `creeperMaxCycles` | 6 | count | give up after this many sprint-hit cycles |
 | `zigzagSidestepPumps` | 4 | pumps | shield_advance_zigzag sidestep length |
 | `coverWaitTicks` | 40 | ticks | break_line_of_sight wait behind the first cover |
@@ -1090,12 +1090,29 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 | `takeCoverQuietTicks` | 200 | ticks | take_cover_overhead: ticks without sightings |
 | `avoidRadius` | `{ "minecraft:enderman": 16, "minecraft:creeper": 8, "minecraft:warden": 30, "minecraft:phantom": 0 }` | blocks | avoid_path_around no-go radii |
 | `avoidRadiusDefault` | 6 | blocks | radius for other mobs |
+| `avoidHoldMaxTicks` | 100 | ticks | avoid_path_around: HOLD phase age cap |
+| `retreatTotalCapTicks` | 1800 | ticks | retreat_and_regen own cap (= `regenMaxTicks` + 600) |
+| `retreatRunClearDist` | 8 | blocks | retreat_and_regen RUN: a home/owner segment must stay this far from every threat |
+| `regenEatRetryTicks` | 40 | ticks | retreat_and_regen: wait after a refused `EatRunner.start` |
+| `eatEmergencyMinThreatDist` | 2 | blocks | emergency eat: no start with a threat closer, unless HP <= `eatEmergencyHp` |
+| `eatEmergencyHp` | 4 | HP | emergency eat: at or below this HP there is no distance floor |
+| `rushMinHp` | 12 | HP | rush_kill: min HP to start; slowed abort below this |
+| `rushAbortHp` | 8 | HP | rush_kill: abort (and poisoned abort) below this HP |
+| `creeperAbortHp` | 12 | HP | knockback_then_retreat abort below this HP |
+| `swoopAbortHp` | 10 | HP | swoop_counter abort below this HP |
+| `zigzagAbortHp` | 8 | HP | shield_advance_zigzag abort below this HP |
+| `coverAbortHp` | 8 | HP | break_line_of_sight abort below this HP |
+| `shieldMinDurabilityPct` | 10 | percent | shield tactics abort below this shield durability |
+| `zigzagMinDurabilityPct` | 20 | percent | shield_advance_zigzag needs at least this shield durability to start |
+| `attackMode` | `"on"` | `"on"\|"off"` | `"off"`: `attackTarget` is a no-op (returns `"invalid"`) and S1's `attackAllowed` is false (S6 B1.6) |
+| `sprintEnabled` | true | bool | false: `setSprinting(true)` always returns false |
+| `dropEnabled` | true | bool | false: `dropSlot` always returns 0 (S4b `dropItem` disabled) |
 
 ---
 
 ## 8. Open questions (with the fallback chosen so builders are not blocked)
 
-| # | Question | Chosen fallback |
+| # | Question | Fallback chosen |
 |---|---|---|
 | OQ-1 | Does `attackEntity` apply the engine cooldown (return false) and crit when falling? (P3) | `attackIntervalTicks = 10`; map engine `false` to `"cooldown"`; `critEnabled` true until the probe says otherwise. |
 | OQ-2 | Does `moveRelative` persist until `stopMoving` and keep a `Continuous` look? Sign of `leftRight`? (P10) | `relativeMoveMethod="relative"` default; runners re-issue every pump; `"move_to"` switch ready. |
@@ -1107,7 +1124,7 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 | OQ-8 | Carved pumpkin on head near endermen (MOBS enderman DO) | Not implemented in Phase 3 (`TODO(phase-5)`): gaze is avoided by never looking and by `avoid_path_around` radius 16. |
 | OQ-9 | Sculk/Deep Dark exit path for `flee_sneak` (leave by the shortest route) | Phase 3 only moves away from `awayFrom` over sculk-free cells; leaving a Y < 0 region is not planned (`TODO(phase-5)`). |
 | OQ-10 | MOBS grammar says "no other atoms" but uses `OR` | `or` supported in the union (§2.2). |
-| OQ-11 | `copper_*` armour/tools and `*_spear` ids exist in 1.26? (TABLES verify) | Copper rows kept (unused if the id never appears); spears are ignored as weapons. |
+| OQ-11 | `copper_*` armour/tools and `*_spear` ids exist in 1.26? (TABLES verify) | Copper rows kept (copper gear exists since 1.21.9, values still verify; rows for ids that never appear are never matched); spears are ignored as weapons. |
 | OQ-12 | Do Bedrock tools lose 2 durability per hit as weapons? | Assumed (sword 1, other tools 2); affects only the swap prediction, the 5-point/10% rule still protects. |
 | OQ-13 | Is `Mainhand` switching by `selectedSlotIndex` instant? | Assumed instant; `attackTarget` is only called after `ensureWeaponSelected()` in the same or an earlier pump. |
 
@@ -1115,15 +1132,44 @@ Merged by the contract writer into `config.body` (`BodyConfig`). All numeric tic
 
 ## 9. Test cases for B5 (`test/body-*.test.ts`, TC-B5)
 
+Test files (identical to the S6 builder table B5 row): `test/body-geometry.test.ts`, `test/body-scan.test.ts`, `test/body-tactics.test.ts`, `test/body-eat.test.ts`, `test/body-equip.test.ts`, `test/adapter-body.test.ts`, `test/probes-combat.test.ts`.
 All against fakes (`FakeCombatBody` recording calls, `FakeWorld` implementing `WorldPort`); no engine.
-- `body-geometry`: `reachDistance` (inside box = 0; 3 blocks away; each axis), `rayBlocked` (wall, open, unloaded=blocked), `standable` (lava below, liquid feet), `dropNear`, `freeRun` (steps ±1).
-- `body-scan`: `findCover` picks the nearest valid ring and honours the budget; `findLowCeiling` pass A vs B and `openDir`; `findRoof` needs the 8-neighbour roof; `pickFleeDirection` boxed-in returns undefined.
-- `body-melee`: scripted ticks for `melee_crit`: jump at 0, no attack at 4, attack at 8 only if `vel.y < 0 && !onGround`, LAND strafe alternation, 12-tick spacing; PLAIN fallback when `jump()` returns false twice; `hit_and_back_off` terrain abort; `melee_strafe` BACKSTEP; `rush_kill` abort on poison; `knockback_then_retreat` hit → RETREAT at tick 0, WAIT_FUSE, `hissing` hard rule, cycle cap.
-- `body-shield`: `shield_hold` RAISE → HOLD → STRIKE → RAISE with `attackWhileShielded` false/true; abort at `shieldDurabilityPct 9`; `swoop_counter` GUARD timing from `eta`; `low_ceiling_fight` never calls `lookAt` with an entity id; `shield_advance_zigzag` sidestep cadence (20 ticks, 4 pumps).
-- `body-tactics`: `break_line_of_sight` leapfrog; `retreat_and_regen` destination choice and `done` at 16 blocks; `flee_sneak` re-asserts sneaking each pump and skips sculk cells; `avoid_path_around` publishes the zone every 20 ticks, radius 0 start refusal; `sprint_away` `cannot_outrun`; `take_cover_overhead` quiet timer.
-- `body-eating`: start refusals (threat 3.9 in normal, 2.1 in emergency, hp 4 override), completion by event / stack decrease / hunger rise, timeout at `eatTicks + 10`, normal abort at 3.4 blocks, emergency never aborts, slot restore.
-- `body-equipment`: tables (armor and weapon scores, sword over axe at equal tier), durability swap at exactly 5 points and exactly 10 %, no swap at 6 points / 11 %, weapon deselected at 2 points, shield placement for both methods, totem never displaced, binding items skipped, chest only fetches swords/armour/shield, ask strings exact, cooldowns (6000 / 600), no ask while fighting.
-- `adapter` test (extend `test/adapter.test.ts` style with `vi.mock`): `attackTarget` return codes for each step 1–9, `equipFromSlot` rollback when `setEquipment` returns false (no duplicate, no loss), same-tick double equip refused, `unequip` rollback.
+
+**`body-geometry`**: `reachDistance` (inside box = 0; 3 blocks away; each axis), `rayBlocked` (wall, open, unloaded=blocked), `standable` (lava below, liquid feet), `dropNear` (radius 2 = 24 cells), `roofed`, `freeRun` (steps ±1).
+
+**`body-scan`**: `findCover` picks the nearest valid ring and honours the budget; `findLowCeiling` pass A vs B and `openDir`; `findRoof` needs the 8-neighbour roof; `pickFleeDirection` boxed-in returns undefined; bearing `i` = `(cos 30°i, sin 30°i)`.
+
+**`body-tactics`** (all tactics; each `TC-B5-tactic-<name>` has 3 assertions: the first command issued after `start`, one phase transition on the stated condition, the exit outcome/`reason`; plus the extra cases listed):
+- `TC-B5-tactic-melee_crit`: jump at 0, no attack at 4, attack at 8 only if `vel.y < 0 && !onGround`, `airStartedAt` set at the first pump with `onGround === false`, LAND strafe alternation, 12-tick spacing; PLAIN fallback when `jump()` returns false twice; ceiling failure selects PLAIN_ONLY (does not refuse); `dropNear` refuses with `unsafe_ground`.
+- `TC-B5-tactic-melee_strafe`: BACKSTEP pump-1 attack at `age >= 4` then CIRCLE; `outOfReachSince` only set in CIRCLE/BACKSTEP; `lost_contact` at 40 ticks; `hostileCountNear >= 3` -> handoff `shield_hold`.
+- `TC-B5-tactic-hit_and_back_off`: HIT -> BACKOFF at a hit; BACKOFF ends at `age >= 16` or 3.0 blocks; `terrain_behind` abort.
+- `TC-B5-tactic-rush_kill`: SPRINT -> STRIKE; abort on poison with HP < 8; `sprintTicks` accumulates across STRIKE -> SPRINT; `target_gone` sets `handoff = "retreat_and_regen"` when poisoned.
+- `TC-B5-tactic-knockback_then_retreat`: hit -> RETREAT at tick 0; WAIT_FUSE keeps running while `hissing && D < 7`; `hissing` hard rule; cycle cap 6; `no_retreat_space`.
+- `TC-B5-tactic-low_ceiling_fight`: never calls `lookAt` with an entity id; `no_ceiling`; HOLD strike cadence; `burst_risk`.
+- `TC-B5-tactic-shield_hold`: RAISE -> HOLD -> STRIKE -> RAISE with `attackWhileShielded` false/true; abort at `shieldDurabilityPct 9`; `lastStrikeAt = startedAt` fallback strike at 24 ticks.
+- `TC-B5-tactic-shield_advance_zigzag`: sidestep cadence (20 ticks, 4 pumps); `too_many_shooters` handoff; own cap 400.
+- `TC-B5-tactic-swoop_counter`: GUARD timing from `eta`; GUARD -> WATCH at `age >= 60`; `under_roof` refusal.
+- `TC-B5-tactic-break_line_of_sight`: leapfrog (12-tick wait); `no_cover` for cover farther than 10 blocks or toward the enemy; `cover_destroyed` on the second re-run.
+- `TC-B5-tactic-retreat_and_regen`: destination choice (home rejected when the segment passes within 8 blocks of a threat); no `timeout` at tick 600 (own cap 1800); `DONE("recovered")` at HP >= `reengageHp` and `minD >= 12`; `DONE("no_food")` at hunger < 18 with no food; refused eat sets `lastEatFailAt`.
+- `TC-B5-tactic-flee_sneak`: re-asserts sneaking each pump; skips sculk cells; `facing`-based fallback point.
+- `TC-B5-tactic-avoid_path_around`: publishes the zone every 20 ticks; radius 0 start refusal; HOLD `FAIL("path_blocked")` at `age >= 100`.
+- `TC-B5-tactic-sprint_away`: `cannot_outrun` for `move_speed === "fast"` at `D < 3`; `DONE("clear")` at `minD >= 24` (`minD = Infinity` for an empty threat list).
+- `TC-B5-tactic-take_cover_overhead`: quiet timer 200; `hostile_in_cover`; `!roofed` open direction.
+- `TC-B5-prologue`: P0 leash abort (`FAIL("leash")` when `ld > leashBlocks && t.distance > 3.5`; no abort at `t.distance <= 3.5`; no abort for the L3-exempt tactics); `onTargetGone` hook; unarmed (`ensureWeaponSelected()` false) still starts.
+
+**`body-eat`** (`TC-B5-eat-states`): idle -> eating -> done / interrupted / failed; start refusals (threat 3.9 in normal, 2.1 in emergency, hp 4 override, hunger 20 with `minecraft:honey_bottle` refused, golden apple allowed); completion by event / stack decrease / hunger rise; a shield `itemStopUse` does not read as an interrupted meal; timeout at `eatTicks + 10`; normal abort at 3.4 blocks; emergency never aborts; slot restore; `eatTicksByType["minecraft:dried_kelp"] === 16`.
+
+**`body-equip`**: tables (armor and weapon scores, sword over axe at equal tier, sharpness V stone sword 11.25 over plain diamond sword 7); `TC-B5-planner-tie` (equal scores resolve by material rank, `frac`, then slot index ascending); durability swap at exactly 5 points and exactly 10 %, no swap at 6 points / 11 %; weapon deselected at 2 points; shield placement for both methods; totem never displaced; binding items skipped; chest only fetches swords/armour/shield; `hotbar_swap` failure -> `ensureWeaponSelected()` false; `ask` emits exactly one `notify({ id: "equipNeed", need, low })` and never a chat call; cooldowns (6000 / 600); no ask while fighting; `ask` before any `tick` returns false.
+
+**`adapter-body`** (extend `test/adapter.test.ts` style with `vi.mock`):
+- `TC-B5-attack-refuse`: `attackTarget` refuses a player, villager, iron golem, tamed pet and the bot itself (`"invalid"`, no `attackEntity` call); return codes for each step 1-9; a fake ray whose first hit is the bot itself still yields `"hit"` (D29); `attackMode: "off"` -> `"invalid"`.
+- `TC-B5-swap-no-dup`: kill/throw the bot between each ordered step of §1.5; item count is conserved; `equipFromSlot` rollback when `setEquipment` returns false (no duplicate, no loss); same-tick double equip refused; `unequip` rollback.
+- `TC-B5-shield-variants`: each value of `body.shieldMethod` (`raiseShield`/`lowerShield`/`shieldState`/`startEating` lowers first).
+- `dropSlot` with `dropEnabled: false` returns 0; `setSprinting(true)` with `sprintEnabled: false` returns false.
+
+**`probes-combat`**: each probe prints exactly one line in the S6 §1.1 format and a `SET` token only for the keys of §6.
+
+The Decision-to-runner map (former TC-B5-executor-map) is tested with the combat executor (S1 §2/§3, D13), not here.
 
 ---
 
@@ -1135,4 +1181,89 @@ All against fakes (`FakeCombatBody` recording calls, `FakeWorld` implementing `W
 - **CR-4 (S1/B3):** B3 builds `MobView`, `TacticSignals`, `TacticContext`, calls `initBodyEvents()` once at worldLoad, `wrapCombatBody` once per bot, forwards `entityItemPickup`/chest events to `EquipmentManager.markDirty`, and calls `EquipmentManager.tick` every pump. `ctx.mobAttackedAt` is fed from `world.afterEvents.entityHitEntity` (damagingEntity = mob, hitEntity = bot).
 - **CR-5 (S4):** call `EquipmentManager.suspend()` before taking a snapshot / disconnecting and `markDirty("rejoin")` after restore. `dropSlot` semantics (one call per invocation) are in §1.3. The equipment slots S4 serialises are `head, chest, legs, feet, offhand` only (never Mainhand), taken via `BodyReads.equipment()` plus the raw `ItemStack` copies S4 reads itself.
 - **CR-6 (S2):** a `retreat_and_regen` tactic eats internally with `ctx.chooseFood()`; S2 may also choose the `eat` option separately. When the loop picks `eat`, it starts an `EatRunner` with the S2 food choice and `mode` = `emergency` for golden apples/chorus fruit, else `normal`.
-- **CR-7 (S5):** `!status` can show `EquipmentManager.report()` (`armorPoints`, `hasWeapon`, `hasShield`, `low`).
+- **CR-7 (S5):** S5 reads `BotStatusView.gear` only (`weaponTypeId`, `armorPieces`, `hasShield`, `foodCount`; D25), which S1's `BotController` fills from `EquipmentManager.report()`.
+
+---
+
+## Revision log (review pass 1)
+
+Decisions applied: D14 (leash in P0 step 4, unarmed = fist damage 1 with the same tactics, `equipNeed weapon` notice), D20 (sharpness +1.25 per level, honey_bottle follows the hunger rule), D24 (no chat; typed `notify equipNeed`), D29 (own id filtered from the LOS ray). D11, D13, D15 are respected (names, §3.5 pointer, fallback order).
+
+S3-body--completeness.md
+- #1: changed (D13 owns the Decision-to-runner map in S1 §2/§3; §3.5 states the contract and D15 fallback; TC-B5-executor-map moves to the S1 executor tests)
+- #2: applied (P0 step 4 leash, L3-exempt list, `FAIL("leash")`; test in `TC-B5-prologue`)
+- #3: changed (D14 wins: unarmed runs the same tactics with fist damage 1; no `unarmedMaxDanger` key; `W` in §3.2, §5.2 unarmed bullet)
+- #4: changed (optional `size?` on `MobEntry` plus fixed `SIZE_FALLBACK` table, so no MOBS edit is needed)
+- #5: changed (§5.1 `counter_gear` paragraph: only `shield`, `sword`, `axe`, `armor` are acted on; other kinds ignored and logged once at debug level)
+- #6: applied (§9 rewritten: one `TC-B5-tactic-<name>` per tactic, `swap-no-dup`, `eat-states`, `planner-tie`, `attack-refuse`, `shield-variants`)
+- #7: applied (§1.2 step 3 now includes `entityId === p.id`, never-target typeIds and tamed; step 1 adds `attackMode`)
+- #8: applied (§5.3: failed `hotbar_swap` skips the select, `ensureWeaponSelected()` returns false, logged `no_slot`; tactics then run unarmed)
+- #9: changed (no new key: `reengageHp` = `config.combat.recoverHp` per consistency #2 / precision #3)
+- #10: changed (§8 column header renamed to "Fallback chosen"; every OQ row already states one)
+
+S3-body--consistency.md
+- #1: applied (§5.4 and `EquipmentManager` deps use `notify`; `chat` removed from the port; §7 and §9 wording; `AskNeed` imported from S5 §6)
+- #2: applied (`reengageHp = config.combat.recoverHp`, 16)
+- #3: applied (§7 `eatTicksByType` keys carry `minecraft:`; §1.1/§4 lookup text)
+- #4: applied (§6 uses the S6 §1.1 line format and S6 §1.2 probe names)
+- #5: applied (§7 rows `attackMode`, `sprintEnabled`, `dropEnabled`; behaviour in §1.2 step 1, §1.3 `setSprinting`, `dropSlot` step 0)
+- #6: applied (hiss keys deleted from §7; `config.combat.*` in §3.1 and §6)
+- #7: applied (§0 and §9 list identical to S6: body-geometry, body-scan, body-tactics, body-eat, body-equip, adapter-body, probes-combat; melee and shield cases merged into body-tactics)
+- #8: applied (`hostileCountNear`)
+- #9: applied (`EquippedStacks`)
+- #10: applied (`report()` comment; CR-7 now says S5 reads `BotStatusView.gear` only, D25)
+- #11: applied (`saturation: number | undefined`)
+
+S3-body--game-api.md
+- #1: applied (D20 formula in §5.1 with a worked example)
+- #2: changed (knockback stated as about 1-3 blocks, unverified, with no FAIL when absent; probe is P3 because API-MAP has no P16)
+- #3: applied (copper label "1.21.9+; values verify", rows never match absent ids, OQ-11 updated)
+- #4: applied (§1.2 note on the invulnerability window)
+
+S3-body--logic.md
+- #1: applied (§1.2 step 7, D29, unit test)
+- #2: applied (`retreatTotalCapTicks` 1800 added to §7; REGEN bounded by `regenMaxTicks`)
+- #3: applied (event handler compares `typeId` and source id; `before.tick` taken after `lowerShield()`)
+- #4: applied (BACKOFF `age >= 16`)
+- #5: applied (`break_line_of_sight` Pre rejects cover farther than 10 or toward the enemy)
+- #6: applied (RUN rejects segments passing within `retreatRunClearDist` 8 of a threat)
+- #7: applied (reachability note in §3.3.12)
+- #8: applied (6 blocks in 40 ticks, `creeperRetreatDist` 6)
+- #9: applied (`airStartedAt` from the first airborne pump)
+- #10: changed (`lastAttackAt`/`lastAttackTick` start at -1000; tactic `lastStrikeAt = startedAt`)
+- #11: applied (melee_strafe abort wording)
+- #12: applied (`DONE("no_food")` exit in REGEN)
+- #13: applied (`avoidHoldMaxTicks` 100, `FAIL("path_blocked")`; 100 per precision #2 rather than 200)
+
+S3-body--precision.md
+- Skipped as already decided (reviewer note): D11, D13, D14, D15, D20.
+- #1: applied (Own cap lines; P0 step 6 list)
+- #2: applied (no-go zones stored only; HOLD cap `avoidHoldMaxTicks` 100 in §7)
+- #3: applied
+- #4: applied (`FAIL` inside `start()` returns false)
+- #5: applied (ceiling failure selects PLAIN_ONLY)
+- #6: applied (`onTargetGone()` hook; `DONE("target_gone")`)
+- #7: applied (WAIT_FUSE rewritten)
+- #8: applied (REGEN eat condition and `EatRequest.mode: "normal"`)
+- #9: applied (`BodySelfState.facing`)
+- #10: applied (`roofed` in `geometry.ts`; doc comments reordered so `freeRun` keeps its own)
+- #11: applied (`dropNear` comment)
+- #12: applied (`ctx.entry.move_speed`, `minD` definition)
+- #13: applied
+- #14: applied (`sprintTicks`)
+- #15: applied (as consistency #3)
+- #16: applied
+- #17: applied (`dirToStand`)
+- #18: applied (`perp`, `swingSign`)
+- #19: applied (`distXZ`)
+- #20: applied (GUARD row)
+- #21: applied (BACKSTEP order)
+- #22: applied (bearing formula)
+- #23: applied (`fleeHp` definition)
+- #24: applied (weapon upgrade rule)
+- #25: applied (copper note)
+- #26: applied (`lastCtx`)
+- #27: applied (`threatsNear` definition)
+- #28: applied (all ten threshold keys plus `retreatRunClearDist`, `regenEatRetryTicks`, `retreatTotalCapTicks`, `avoidHoldMaxTicks` in §7; a script check found no `cfg.*` name in the text without a §7 row)
+- #29: applied (`behind` formula)
+- #30: applied (`dropSlot` step 5)

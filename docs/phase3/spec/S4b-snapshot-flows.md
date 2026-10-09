@@ -1,7 +1,7 @@
 # S4b: Snapshot flows, exactly-once restore, invariants, failure handling (Phase 3)
 
 Owner: S4b. Consumers: B4 (`src/core/snapshot/machine.ts`, `src/game/snapshot/service.ts`, `test/snapshot-machine|service|conservation.test.ts`), B3 (runtime wiring, controller hand-off), B6 (core reactions to the events), TC-B4 case writers.
-S4a (`S4a-snapshot-data.md`) owns *what* `captureSnapshot`, `applySnapshot`, `SnapshotStore` do. This file owns *when* they are called, in what order, and what happens when they fail. Names are used exactly as S4a / S5 define them (`BotSnapshot`, `RestoreToken`, `SnapshotStore.write/read/readDetailed/markRestored/delete/listRoster/readMeta/writeMeta/gcAll`, `captureSnapshot`, `clearSnapshotted`, `applySnapshot`, `planApplySteps`, `scanDroppedItems`; events `botDismissed`, `botDismissFailed`, `botEscaped`, `botRejoined`, `botRejoinFailed`, `rosterRestored`, `botNotice`; effects `dismissBot`, `summonBot`, `persistMeta`). Fields are added, never renamed. Binding cross-doc decisions D6, D7, D9, D10 of `DECISIONS.md` (this file's own §0 decisions are numbered A1-A10) are applied: `snapshot.intervalTicks`; `"storage_full"` in `SnapshotFailReason`; S4a's extra helpers are used; the P4-says-drops fallback, the forced-write contract and `partial`/`leftover` to `carryover` are covered in §3, §8 and §10.
+S4a (`S4a-snapshot-data.md`) owns *what* `captureSnapshot`, `applySnapshot`, `SnapshotStore` do. This file owns *when* they are called, in what order, and what happens when they fail. Names are used exactly as S4a / S5 define them (`BotSnapshot`, `RestoreToken`, `SnapshotStore.write/read/readDetailed/markRestored/delete/listRoster/readMeta/writeMeta/gcAll`, `captureSnapshot`, `clearSnapshotted`, `applySnapshot`, `planApplySteps`, `scanDroppedItems`; events `botDismissed`, `botDismissFailed`, `botEscaped`, `botRejoined`, `botRejoinFailed`, `rosterRestored`, `botNotice`; effects `dismissBot`, `summonBot`, `persistMeta`). Fields are added, never renamed. Binding cross-doc decisions D6, D7, D9, D10, D21, D26 of `DECISIONS.md` (this file's own §0 decisions are numbered A1-A11) are applied: `snapshot.intervalTicks`; `"storage_full"` in `SnapshotFailReason`; S4a's extra helpers are used by their exact names (`rollbackClearHeld`, `scanDroppedItems`, `DirtyReason`, ...); the P4-says-drops fallback, the forced-write contract and `partial`/`leftover` to `carryover` are covered in §3, §8 and §10 (map in A11); hand-offs H1-H7 are accepted (§14); `carry` holds `brainState`, `recover`, `objectiveItemIds`, `stats` only and the core, not the snapshot service, owns the task on an escape rejoin (D26).
 
 ## 0. Decisions at a glance
 
@@ -15,8 +15,9 @@ S4a (`S4a-snapshot-data.md`) owns *what* `captureSnapshot`, `applySnapshot`, `Sn
 | A6 | **Escape destination**: home if set, else the owner's feet. Neither available: `requestEscape` returns false and the bot gets notice `escapeBlocked` (S5). If the destination disappears after the commit (owner logged off), the bot **stays dismissed** (`botRejoinFailed`, reason `owner_offline`, snapshot kept). No cooldown. |
 | A7 | **Restore** order: `markRestored` (persisted, read back) then `applySnapshot` (S4a §5.3-5.4). The decoded snapshot stays in service memory (`RestoreRun.snap`) because the store no longer returns a consumed seq. Any failure after `markRestored` and before the first `setItem` **re-arms** (writes the in-memory snapshot as a new seq). |
 | A8 | In-session restore reuses the live `ItemStack` copies (`HeldStacks`, lossless: trims, shield banners) when `snapshot.inSessionStacks`; excluded stacks are removed from `held` before it is stored, so `planApplySteps` never writes them back. |
-| A9 | Task fate: escape keeps the task assigned and paused (carry). Manual dismiss: the core has already cancelled the task (S5 §4.4); the service refuses with `busy` if a task is still present. Idle and far dismiss only start for a bot with no task. |
+| A9 | Task fate: escape keeps the task assigned **in the core** (`presence = "rejoining"`); the carry holds no task (D26). Manual dismiss: the core has already cancelled the task (S5 §4.4); the service refuses with `busy` if a task is still present. Idle and far dismiss only start for a bot with no task. |
 | A10 | Save & Quit: on world load every roster row of status `online` or `escaping` is respawned (restore order lastPos, home, owner's feet); status `dismissed` rows stay dismissed. A bot is rejoined only if its owner is online or home is set (S5 §4.7). |
+| A11 | D10 coverage map. (1) P4-says-drops fallback: rows V3, A5, A6, failure F5, `scanDrops` in §3.1, S4a §6.3. (2) Forced-write contract (a failed write never clears the body): rows C4, C5, C6, failures F8-F10, invariants 2 and 9. (3) `partial` / `leftover` -> `carryover`: rows A2, A3, §3.3 step 2, §8.2, failure F2, invariant 10. |
 
 ## 1. Machinery shared by all flows
 
@@ -77,7 +78,7 @@ export interface SnapshotEngine {
   dropSlot(bot: SimBot, slot: number): number;                  // S3 dropSlot: items that left the bot (0 = failed)
   navigateTo(bot: SimBot, target: Vec3): boolean;               // false = no path / threw
   location(bot: SimBot): Vec3 | undefined;
-  rollbackClear(bot: SimBot, held: HeldStacks, snap: BotSnapshot): number;   // §1.5, snapshot-io.ts
+  rollbackClearHeld(bot: SimBot, held: HeldStacks, snap: BotSnapshot): number;   // S4a §5.2a, snapshot-io.ts (same name, same signature)
   worldLoadedTick(): Tick;
 }
 export interface BotDirectory {
@@ -86,8 +87,8 @@ export interface BotDirectory {
   /** Controller lifecycle (S1 §2.3). */
   dispose(botId: BotId, reason: "dismissed" | "escaped"): void;
   onEscapeFailed(botId: BotId, now: Tick): void;
-  /** Create the controller + BotEntry for a respawned body. init undefined = fresh idle controller; with carry = recover state (S1 §3.6). */
-  registerRejoined(bot: SimBot, init: { carry?: ControllerCarry; recover?: boolean; stats?: string } | undefined, now: Tick): BotId;
+  /** Create the controller + BotEntry for a respawned body. init undefined = fresh idle controller; with init.carry = RECOVER start (S1 §3.6). No task travels in the carry (D26). */
+  registerRejoined(bot: SimBot, init: ControllerInit | undefined, now: Tick): BotId;
   adopt(bot: SimBot): BotId;                                    // body already alive (script reload): Phase 1 adopt path
   lastActiveTick(botId: BotId): Tick;                           // last tick the layer was not "idle" or a task was assigned
 }
@@ -142,13 +143,9 @@ export function mapReadFail(r: "no_snapshot" | "consumed" | "snapshot_unreadable
 `pump(now)` runs once per runtime pump, after every `controller.tick`. Order: (1) world-load restore queue (§6); (2) advance every `LeaveFlow` and `RestoreFlow` one step (sorted by `startedAt`, then name); (3) idle/far detection (§4); (4) S4a checkpoint writer (skipped for bots with a flow). One step = at most one state transition **plus** the synchronous commit when entered. A bot has at most one flow (`flows: Map<lowerName, SnapshotFlowState>`); a second request while a flow exists is refused (`requestEscape` false; `dismissBot` or `summonBot` answered with `busy`; except the idle-to-command takeover of §4.3).
 Every flow has a deadline: `now - startedAt >= snapshot.flowDeadlineTicks` (500) before the commit (LEAVE) or before `mark` (RESTORE) aborts it with reason `error`. 500 < `flowTimeoutTicks` (600, S5) so the core's timeout never fires first.
 
-### 1.5 Adapter addition requested from S4a (`snapshot-io.ts`)
+### 1.5 `rollbackClearHeld` (defined by S4a §5.2a, hand-off H5 applied)
 
-```ts
-/** Undo a failed/partial clear: for every key in `held` whose slot is currently EMPTY, setItem(slot, held stack); never touches a non-empty slot, never addItem. Returns the number of stacks put back. */
-export function rollbackClearHeld(bot: SimBot, held: HeldStacks, snap: BotSnapshot): number;
-```
-Used only by §2.2 row C6 (clear failed) and §10 F12 (disconnect failed). It cannot duplicate: it only fills slots that `clearSnapshotted` emptied.
+`rollbackClearHeld(bot, held, snap): number` (S4a, `snapshot-io.ts`) refills only slots that `clearSnapshotted` emptied, from `held`; never touches a non-empty slot, never `addItem`. Used only by §2.2 rows C6 (clear failed) and C8 (disconnect failed), and by row G2 and failure F12/F13. It cannot duplicate. The service reaches it through `SnapshotEngine.rollbackClearHeld` (§1.2).
 
 ### 1.6 Excluded-item disposal (shared by every LEAVE variant)
 
@@ -201,13 +198,13 @@ Trigger: effect `dismissBot { botId, name, cause: "command", requestedBy }`. The
 ### 2.2 The commit (one synchronous call; exact order)
 
 ```
-C1  cap = captureSnapshot(bot, { now, status, owner, stats: deps.serializeStats(name), pausedTaskId: carry?.().task?.id,
+C1  cap = captureSnapshot(bot, { now, status, owner, stats: deps.serializeStats(name), pausedTaskId: directory.taskIdOf(botId),
                                  carryover: pendingCarryover.get(lower), maxStatsChars })
       status = K==="escape" ? "escaping" : "dismissed"
       cap not ok                                  -> fail("error")
 C2  cap.excluded.length > 0                       -> excludedLoops++; if excludedLoops > snapshot.excludedLoopMax (3) fail("error"); else state=prep (re-dispose)   [bot picked something up]
-C3  carryNow = K==="escape" ? carry() : undefined    // exportCarry() is read BEFORE the clear and before dispose
-C4  w = store.write(cap.snap)                     -> !ok: fail(mapWriteFail(w.reason)); the body is NOT cleared (S4a D6, forced-write contract, D10)
+C3  carryNow = K==="escape" ? carry() : undefined    // exportCarry() (brainState, recover, objectiveItemIds, stats; no task) is read BEFORE the clear and before dispose; stored in flow.carry for the RESTORE flow
+C4  w = store.write(cap.snap)                     -> !ok: fail(mapWriteFail(w.reason)); the body is NOT cleared and not disconnected (S4a D6, forced-write contract, D10)
 C5  r = store.readDetailed(name); require r.ok && r.snap.seq === w.seq && contentHashOf(r.snap) === contentHashOf(cap.snap)
                                                   -> else fail("error")   // "verify stored"
 C6  cl = clearSnapshotted(bot, cap.snap)          -> !ok: rollbackClearHeld(bot, cap.held, cap.snap); recapture + store.write(status "online"); fail("error")
@@ -273,7 +270,7 @@ Trigger: effect `summonBot { name, near, dimensionId, requestedBy }` (cause `sum
 | HD1 | haul_drop | see §7 | | | haul_away / live |
 | LV1 | live | entered | none | register + checkpoint + events, exact order of §3.3 | end |
 
-`scanDrops` in A1 = `cfg.dropsOnDisconnect && snap.status === "online"` for **every** cause (clarifies S4a §6.2 item 6: the status, not the cause, tells whether the body left without a clear step).
+`scanDrops` in A1 = `cfg.snapshot.dropsOnDisconnect` for **every** cause; `applySnapshot` itself runs the drop scan only when `snap.status === "online"` (S4a §5.3 step 3 and §6.2 item 6, H5: the status, not the cause, tells whether the body left without a clear step). V3 and A5 wait on the same condition (`dropsOnDisconnect` and `status === "online"`). When `result.skippedAsDropped > 0` the service logs `[colony] <name>: <n> stacks left on the ground (drop scan)`; the stacks stay on the ground (conserved).
 
 ### 3.2 Destinations (`destOrder`, resolved in V2)
 
@@ -288,7 +285,7 @@ Spawn cell search (`findSpawnCell`, adapter, pure scan with `blockAt`): candidat
 
 ### 3.3 Live (LV1), exact order (nothing may be reordered)
 
-1. `id = directory.registerRejoined(bot, init, now)`: `init = undefined` for summon/reload/owner_returned plus `stats: snap.stats`; for escape `init = { carry, recover: true, stats: snap.stats }`. The controller exists **before** the event so the `assign` effect finds it.
+1. `id = directory.registerRejoined(bot, init, now)`: for summon/reload/owner_returned `init = { stats: snap.stats }` (fresh idle controller, no carry); for escape `init = { carry: flow.carry, stats: snap.stats }` (`flow.carry` = `{ brainState, recover: true, objectiveItemIds?, stats? }`, no task, D26; `init.stats` overrides `carry.stats`). The controller exists **before** the event so the `assign` effect the core emits on `botRejoined` finds it.
 2. `markDirty(name, "rejoin", now)` and an immediate forced write: `captureSnapshot(... status "online", carryover: leftover)` then `store.write`. This replaces the consumed seq at once and persists `leftover` as `carryover` (S4a §5.4 step 5, D10). Failure: log, `pendingCarryover.set(lower, leftover)`, retried by the normal checkpoint writer (it passes `carryover` until one write succeeds).
 3. `emit botRejoined { now, botId: id, name, cause, pos: bot position, stacks, owner: snap.owner, dest?, seq, leftover: leftover.length, haulDropped? }`. `dest` only for `escape`.
 4. If `leftover.length > 0`: `emit botNotice { name, botId: id, notice: { id: "restoreLeftover", count: sum of leftover n } }`.
@@ -359,10 +356,10 @@ Returns synchronously; the work happens in `pump` of the same tick. Checks in or
 | 7 | Spawn the same name at `home` else the owner's feet (`destOrder("escape")`) | SP1 |
 | 8 | Grounded, `markRestored`, `applySnapshot` (held stacks, no drop scan: the body was cleared) | GR1, M1, A1 |
 | 9 | Haul drop when the destination is the owner (§7) | HD1, HD2 |
-| 10 | Register the controller with `{ carry, recover: true }`; forced `online` write; `botRejoined` | LV1 |
-| 11 | The core re-emits `assign` (same task id, `delivered` folded) on `botRejoined`; the controller replaces its carried executor and stays in RECOVER until `hp >= recoverHp` (S1 §3.5-3.6) | (core) |
+| 10 | Register the controller with `{ carry, stats }` (`carry.recover = true`); forced `online` write; `botRejoined` | LV1 |
+| 11 | The **core** re-emits `assign` (same task id, `delivered` folded) on `botRejoined`. The controller creates the executor from that `assign`, in the paused/recover layer, and keeps it paused until `hp >= recoverHp` (S1 §2.5 / H4, §3.5-3.6) | (core) |
 
-Controller hand-off (S1 §2.3, §3.6): at step 5 the old controller is disposed with `"escaped"` and its executor was never cancelled; the paused task travelled in `carry` (`task` rebuilt with `delivered = progress.delivered`, `progress`, `brainState`, plus `objectiveItemIds`, hand-off H2). At step 10 the runtime builds `new BotController(deps, { carry, recover: true, stats }, now)`: layer `combat`, phase `recover`, executor created from `carry.task` and paused. If the flow fails *before* step 5, `directory.onEscapeFailed(botId, now)` (S1 T17). If it fails *after* step 5, the core receives `botRejoinFailed { cause: "escape" }` (task requeued, bot becomes `dismissed`, snapshot kept).
+Controller hand-off (S1 §2.3, §3.6; D26: one task owner, the core): at step 5 the old controller is disposed with `"escaped"`; it exports `ControllerCarry = { brainState, recover, objectiveItemIds?, stats? }` (hand-off H2) and **no task**: the task stays assigned in the core record (`presence = "rejoining"`, §11.3). At step 10 the runtime builds `new BotController(deps, { carry, stats }, now)`: layer `combat`, phase `recover`, **no executor**. The controller never rebuilds a task from the carry or from the snapshot. When the core's re-emitted `assign` arrives, the controller creates the executor already paused (H4: the `recover` layer holds it) and it resumes when recovery ends. If the flow fails *before* step 5, `directory.onEscapeFailed(botId, now)` (S1 T17). If it fails *after* step 5, the core receives `botRejoinFailed { cause: "escape" }` (task requeued, bot becomes `dismissed`, snapshot kept).
 
 ### 5.3 Worked example (tick arithmetic, seq arithmetic)
 
@@ -404,7 +401,7 @@ Example: bot saved at (100.5, 64, -20.25); on load the chunk at (100, -21) is un
 
 ## 7. Haul delivery with no home
 
-Trigger: RESTORE cause `escape`, actual destination kind `owner` (no home, or home unusable at spawn time), `carry.task.kind === "gather"`, and `carry.objectiveItemIds` non-empty. Otherwise nothing is dropped (with a home set, Phase 3 keeps the cargo and the bot resumes; home chests and the sorter are Phase 4).
+Trigger: RESTORE cause `escape`, actual destination kind `owner` (no home, or home unusable at spawn time), and `carry.objectiveItemIds` non-empty (only a gather executor exports a non-empty objective item list, so no task kind is needed and the carry holds no task, D26). Otherwise nothing is dropped (with a home set, Phase 3 keeps the cargo and the bot resumes; home chests and the sorter are Phase 4).
 Rule: **drop the objective items, keep tools, armour, shield and food.** `haulSlots` = inventory slots (after the restore) whose typeId is in `objectiveItemIds` and is not gear or food (gear test of §4.2 item 1).
 
 | # | State | Trigger | Guard | Action | Next |
@@ -416,7 +413,7 @@ Rule: **drop the objective items, keep tools, armour, shield and food.** `haulSl
 | HD5 | haul_away | within 1 block of target, or `haulStepTimeoutTicks` (60), or `navigateTo` false | | none | live |
 
 The bot walks away so it does not pick the drop up again. Conservation: dropped items are world entities; the snapshot was already consumed, so nothing exists twice.
-**Core accounting** (hand-off H3): on `botRejoined` with `haulDropped`, `delivered' = progress.delivered + min(haulDropped.count, progress.held)` before the re-`assign`; if `delivered' >= amount` the task is dropped silently (S5 §4.7).
+**Core accounting** (hand-off H3; `progress` is the core record's progress for the task, not part of the carry, D26): on `botRejoined` with `haulDropped`, `delivered' = progress.delivered + min(haulDropped.count, progress.held)` before the re-`assign`; if `delivered' >= amount` the task is dropped silently (S5 §4.7).
 Example: gather 16 oak_log, `progress = {delivered: 3, held: 12}`, no home, owner at the destination. Restore puts the 12 logs back; HD2 drops them (12 calls = 2 pumps at 8 per pump if `dropSelectedItem` drops one item per call, P10); `haulDropped = {itemIds:["minecraft:oak_log"], count:12}`; `delivered' = 3 + min(12, 12) = 15 < 16`: the task continues with 1 log to go. Sword, armour and apples stay in the bot.
 
 ## 8. Exactly-once restore
@@ -536,9 +533,14 @@ export type SnapEvent =                                   // members of ColonyEv
 // effects (unchanged from S5): dismissBot { botId, name, cause: "command", requestedBy },
 // summonBot { name, near, dimensionId, requestedBy }, persistMeta { meta }.
 
-// src/core/combat/types.ts addition (S1 hand-off H2)
-export interface ControllerCarry { task?: Task; progress?: TaskProgress; brainState: unknown; objectiveItemIds?: string[] }
-export interface ControllerInit { carry?: ControllerCarry; recover?: boolean; stats?: string }
+// src/core/combat/types.ts (S1 hand-offs H2 + D26). NO task, NO progress: the core owns the task and re-emits `assign` on botRejoined.
+export interface ControllerCarry {
+  brainState: unknown;                 // BrainState (S2b), committed tactic/target state
+  recover: boolean;                    // true for an escape rejoin: start in layer `combat`, phase `recover`
+  objectiveItemIds?: string[];         // executor.objectiveHint().items.ids at export time (§7 haul trigger)
+  stats?: string;                      // serialised OutcomeStats; init.stats (= snap.stats) overrides it
+}
+export interface ControllerInit { carry?: ControllerCarry; stats?: string }   // stats alone = fresh idle controller that loads snap.stats
 ```
 `stacks` always equals `stacksOf(snapshot)` of §2.2. `dest` on `botEscaped` is the choice made at request time (`"home" | "owner"`); `dest` on `botRejoined` is the **actual** destination kind (`home` or `owner`). Messages use `botRejoined.dest`.
 
@@ -561,7 +563,7 @@ Idle/far flows never emit `botDismissFailed` (the core never marked the bot `lea
 
 | Flow | Task | Mechanism |
 |---|---|---|
-| Escape | Stays assigned and paused. The core keeps it (`presence = "rejoining"`), `!stop` clears it without a `cancel` effect, `botRejoined` re-`assign`s the same id with `delivered` folded (S5 §4.7) | `ControllerCarry` |
+| Escape | Stays assigned. The core keeps it (`presence = "rejoining"`), `!stop` clears it without a `cancel` effect, `botRejoined` re-`assign`s the same id with `delivered` folded (S5 §4.7); the new controller creates its executor from that `assign`, paused in the recover layer (D26, H4). The carry holds no task | core record + `assign` effect (not `ControllerCarry`) |
 | Failed escape rejoin | Core requeues it at the queue front (`botLeftRequeued`); the bot becomes `dismissed` | `botRejoinFailed` |
 | Manual dismiss | The core already dropped the task (own task, `"stopped"`) or requeued it (pinned override). The service **refuses with `busy`** if `taskIdOf(botId)` is still set (L1) | S5 §4.4 |
 | Idle / far dismiss | Not eligible unless the bot has no task; an `assign` arriving before the commit aborts the flow (`onAssign`) | §4.2 item 5 |
@@ -642,14 +644,24 @@ New keys in `config.snapshot` (S4a keys are in S4a §7; `intervalTicks` per D6) 
 | Q7 | Home in another dimension than the owner for escape. | `home` wins; spawn happens in the home's dimension (S5 Q2). |
 | Q8 | Repeated escape loops if the destination is itself hostile (no cooldown by design). | Accepted (ROADMAP). Every loop is conserving; `combatDebug.escapes` counts them. |
 
-**Hand-offs (other sections must apply; the Reconciler lists them in DECISIONS.md):**
+**Hand-offs (all accepted by D21; the reviser of each target doc applies the rows that name it: H1/H3/H7 -> S5, H2/H4 -> S1, H5 -> S4a (done), H6 -> S6):**
 
 | # | To | Needed change |
 |---|---|---|
 | H1 | S5 §6 routing | Bot-voiced `botNotice` (`chestFull`, `excludedDropped`, `restoreLeftover`) must resolve the record by name in **any** presence (`live`, `leaving`, `rejoining`), because dismiss/escape notices are sent while the record is `leaving`/`rejoining`. Otherwise they are dropped. |
-| H2 | S1 §3.6 / `ControllerCarry`, `ControllerInit` | Add `objectiveItemIds?: string[]` to `ControllerCarry` (from `executor.objectiveHint().items.ids`) and `stats?: string` to `ControllerInit` (the brain loads `snap.stats` through S2b). |
+| H2 | S1 §3.6 / `ControllerCarry`, `ControllerInit` | `ControllerCarry = { brainState, recover, objectiveItemIds?, stats? }` exactly as §11.1: **no `task`, no `progress`** (D26). `objectiveItemIds` comes from `executor.objectiveHint().items.ids`; `ControllerInit = { carry?, stats? }` (the brain loads `snap.stats` through S2b). S1 §3.6 no longer rebuilds the executor from `carry.task`. |
 | H3 | S5 §4.7 `botRejoined` | Fold `haulDropped` into `delivered` (rule in §7). Accept the optional fields `seq`, `leftover`, `haulDropped`, `pos` of §11.1. |
-| H4 | S1 §2.5 `assign` | When `executor?.taskId === task.id` (the carried executor), replace it silently (no warning) and keep the paused/recover layer. |
-| H5 | S4a | Add `rollbackClearHeld` (§1.5). §6.2 item 6: run the drop scan for any cause when `snap.status === "online"`, not only `reload`/`owner_returned`. |
+| H4 | S1 §2.5 `assign` | A controller created with `carry.recover = true` has no executor. The core's re-emitted `assign` creates the executor in the paused/recover layer (no warning); the executor resumes when recovery ends. If an executor with the same `taskId` already exists, replace it silently and keep the layer. |
+| H5 | S4a | DONE in S4a: `rollbackClearHeld` (S4a §5.2a); drop scan for any cause when `snap.status === "online"` (S4a §5.3 step 3, §6.2 item 6). |
 | H6 | S6 | `snapshot.timerTicks` -> `snapshot.intervalTicks` (D6); `idle.dismissTicks` -> `idle.idleTicks`; the two GameTest fixes of §12; `combatDebug` gains `excludedDropped` and `summons`. |
 | H7 | S5 §5/§6 | `SnapshotFailReason` adds `"storage_full"`; `SNAPSHOT_FAIL_TEXT.storage_full = "the colony's save space is full"` (D7). |
+
+## Revision log (review pass 1)
+
+No review files exist for S4b (`docs/phase3/reviews/S4b-snapshot-flows--*.md` matches nothing); this pass applies `DECISIONS.md` rows only.
+
+- DECISIONS D10: applied/confirmed. The three hand-offs are already covered; added the coverage map as decision A11 (P4-says-drops fallback: V3/A5/A6/F5; forced-write contract: C4-C6/F8-F10/invariants 2, 9; `partial`/`leftover` -> `carryover`: A2/A3/§3.3 step 2/§8.2/F2/invariant 10). C4 now also says "not disconnected".
+- DECISIONS D21 (S4b hand-offs H1-H7): applied. §14 heading says all accepted and who applies what. H2 and H4 rewritten to the D26 shape. H5 marked DONE (S4a now defines it).
+- DECISIONS D26: applied. `ControllerCarry` is now `{ brainState, recover, objectiveItemIds?, stats? }` (no `task`, no `progress`); `ControllerInit = { carry?, stats? }`; `registerRejoined` takes `ControllerInit`. §3.3 step 1, §5.2 steps 10-11 and the controller hand-off paragraph, §7 trigger (now `carry.objectiveItemIds` non-empty, no task kind), §11.3 escape row, A9 and the §7 core-accounting note changed: the core re-emits `assign` on `botRejoined`; the controller creates the executor paused in the recover layer (H4).
+- Names matched to S4a: engine port member `rollbackClear` renamed `rollbackClearHeld` (S4a §5.2a); §1.5 now points to S4a instead of requesting it; `C1 pausedTaskId` uses `directory.taskIdOf(botId)` (the carry has no task); `scanDrops = cfg.snapshot.dropsOnDisconnect` for every cause, S4a decides by `snap.status === "online"` (A1 note); `skippedAsDropped` is logged; `DirtyReason` and `scanDroppedItems` are now defined by S4a.
+- DECISIONS D6, D7, D9: already followed in this file (`intervalTicks`, `storage_full`, S4a helpers); header sentence extended, no other change.

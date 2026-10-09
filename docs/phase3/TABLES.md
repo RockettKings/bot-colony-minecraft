@@ -113,11 +113,11 @@ Definitions for every rule below:
 | topup | no threat within 24 blocks AND hunger <= 17 AND missing >= 2 (at the default `topupHungerMax = 17` the `missing >= topupMinMissing (2)` test is always true; it only matters if `topupHungerMax` is raised to 18 or more) | topup, main, raw | `fit_largest`: among items with `item.hunger <= missing`, max `item.hunger`; tie lowest `item_value`. If no item fits, `fit_smallest_overflow`: smallest `item.hunger`, only if overflow `(item.hunger - missing) <= 2`; else eat nothing |
 | pre_engage_heal | about to engage or resume combat AND (hunger < 20 OR HP < max) AND time to contact >= eat_ticks + 20 | main, topup | `max_sat_gain`: max `sat_gain`; tie max `item.hunger`; tie lowest `item_value` |
 | emergency | HP <= 6 (3 hearts) AND hostile within 16 blocks (or HP <= 4 any threat) | emergency, then fall through to pre_engage_heal | `fixed_order`: `enchanted_golden_apple` > `golden_apple`. Allowed even at hunger = 20 |
-| starving | hunger <= 6 AND no eligible item in tags topup, main, raw  (or hunger = 0 and HP dropping) | topup, main, raw, stew, avoid, emergency | non-avoid tags: `fit_largest` ignoring `missing` limit (max hunger). `avoid`: `avoid_order` below. `emergency` only if HP <= 6 and nothing else |
+| starving | hunger <= 6 AND no eligible item in tags topup, main, raw  (or hunger = 0 and HP dropping) | topup, main, raw, avoid, emergency (no `stew` entry: every stew is tagged `main` or `avoid`, so it is covered) | non-avoid tags: `fit_largest` ignoring `missing` limit (max hunger). `avoid`: `avoid_order` below. `emergency` only if HP <= 6 and nothing else |
 | escape_teleport | HP <= 6 AND melee threat within 3 blocks AND escape-rejoin is not available AND the bot holds no eligible item with tag `emergency` | escape | `fixed_order`: `chorus_fruit`. Never when in melee with eat_ticks not covered (see guard) |
 
 Guards (apply to every situation except where noted):
-- `eat_guard`: start eating only if no hostile is within `eat_ticks / 20 * threat_speed + 2` blocks (suggested threat_speed 5 blocks/s), otherwise retreat first. The comparison is `distance <= threshold` blocks eating: at equality the bot does not eat. Example: `32 / 20 * 5 + 2 = 10` blocks, so a zombie at exactly 10.0 blocks blocks a normal meal. At runtime the S2a `canEatSafely` rule (stricter, D23) replaces this threshold; this line is the data default. `emergency` and `escape_teleport` may start with the threat closer, but not while a melee mob is already within 2 blocks unless HP <= 4.
+- `eat_guard`: start eating only if no hostile is within `eat_ticks / 20 * threat_speed + 2` blocks (suggested threat_speed 5 blocks/s), otherwise retreat first. The comparison is strict: the bot eats only if every hostile has `distance > threshold`; at `distance == threshold` it does not eat. Example: `32 / 20 * 5 + 2 = 10` blocks, so a zombie at exactly 10.0 blocks blocks a normal meal. At runtime the S2a `canEatSafely` rule (stricter, D23) replaces this threshold; this line is the data default. `emergency` and `escape_teleport` may start with the threat closer, but not while a melee mob is already within 2 blocks unless HP <= 4.
 - Poison guard: items with `poison` need HP >= 8 and no threat within 16 blocks (poison cannot kill but leaves 1 HP).
 - `always_edible`: golden_apple, enchanted_golden_apple, chorus_fruit. `honey_bottle` is not always edible: it follows the normal hunger rules (cannot be eaten at hunger = 20; D20).
 - Return items: after eating a `stew`, `returns_item` bowl lands in inventory (junk value 0.1, do not treat as cargo loss).
@@ -183,7 +183,6 @@ Milk bucket and potions are not food. They have value rows in 4.6 (`milk_bucket`
         "topup",
         "main",
         "raw",
-        "stew",
         "avoid",
         "emergency"
       ],
@@ -598,21 +597,21 @@ State: hunger 14, saturation 2, HP 20/20, inventory 5 `bread`, 2 `cooked_beef`, 
 ### Example 2: same bot, HP 6, zombies 10 blocks away
 State: hunger 14, saturation 2, HP 6/20, 3 zombies at 10 blocks.
 - HP <= 6 and hostile within 16 -> situation `emergency`.
-- Eat guard: the normal guard threshold is `32 / 20 * 5 + 2 = 10` blocks; the zombies are at 10 blocks and the comparison is `distance <= threshold` (equality blocks), so a normal meal is blocked. `emergency` may start with a closer threat: contact in about 10 / 5 = 2 s = 40 ticks, eat_ticks = 32, so the apple finishes before contact (margin 8 ticks; emergency may start with a smaller margin than the normal 20). No melee mob is within 2 blocks, so the emergency exception applies.
+- Eat guard: the normal guard threshold is `32 / 20 * 5 + 2 = 10` blocks; the zombies are at 10 blocks and eating needs `distance > threshold` (strict, 10.0 is not > 10), so a normal meal is blocked. `emergency` may start with a closer threat: contact in about 10 / 5 = 2 s = 40 ticks, eat_ticks = 32, so the apple finishes before contact (margin 8 ticks; emergency may start with a smaller margin than the normal 20). No melee mob is within 2 blocks, so the emergency exception applies.
 - `fixed_order`: enchanted_golden_apple (not held), golden_apple (held). **Eat `minecraft:golden_apple`** (Regeneration II 5 s, Absorption I 120 s).
 - After the apple is eaten the state is hunger min(20, 14+4) = 18, saturation min(18, 2+9.6) = 11.6. After the threat is handled or if there are 2+ s of space: `pre_engage_heal` picks by sat_gain from that state: cooked_beef (`sat_after = min(min(20, 18+8), 11.6+12.8) = min(20, 24.4) = 20`, gain 20 - 11.6 = 8.4) beats bread (`sat_after = min(min(20, 18+5), 11.6+6) = 17.6`, gain 6.0). So the next meal is `cooked_beef`.
 - If HP were 12 instead (not emergency): pre_engage_heal directly picks `cooked_beef` from the original state (hunger 14, saturation 2): cooked_beef `sat_after = min(20, 2+12.8) = 14.8`, gain 12.8; bread `min(19, 2+6) = 8`, gain 6.
 
 ### Example 3: starving
 State: hunger 3, HP 14, inventory: 3 `rotten_flesh`, 1 `spider_eye`, 2 `chicken`, 1 `pufferfish`. No safe food.
-- Situation `starving` (hunger <= 6, no topup/main/raw item).
+- Situation `starving` (hunger <= 6, no eligible topup/main/raw item; the 2 `chicken` are tagged `avoid` only, not `raw`, so they do not make `starving` false).
 - avoid_order: rotten_flesh first (no condition). **Eat `minecraft:rotten_flesh`** (+4 hunger, hunger effect 80% 30 s). Repeat while hunger <= 6; then chicken, then spider_eye (HP >= 8 ok), pufferfish never (needs HP >= 12 and hunger <= 2).
 
 ### Example 4: cargo and gear value
 State: 3 `diamond`, 32 `dirt`; equipped full iron armour (undamaged, unenchanted) and an `iron_sword` at 50% durability (not objective items, no task).
 - diamonds: 3 x 40 = 120. dirt: 32 x 0.1 = 3.2. otherCargoRaw = 123.2; otherCargoValue = min(900, 123.2) = 123.2.
 - armour: helmet 20 + chestplate 32 + leggings 28 + boots 16 = 96. iron_sword: 8 x max(0.25, 0.5) = 4. gearValue = 100.
-- objectiveValue = 0 (no task). cargoValue = 123.2. deathCost = 100 + 123.2 = 223.2.
+- objectiveValue = 0 (no task; same for `goto`, `defend`, `idle`: no objective items, so the decision rests on gear and cargo value alone). The held `iron_sword` is one inventory slot and is counted once. cargoValue = 123.2. deathCost = 100 + 123.2 = 223.2.
 - Same bot with the chestplate enchanted Protection IV + Unbreaking III + Mending: sum levels 7, mult = min(3, 1 + 0.7 + 0.5) = 2.2 -> chestplate 70.4, gearValue 138.4.
 
 ### Example 5: objective dominance (iron)
@@ -628,3 +627,35 @@ Task: gather 64 `oak_log` (requiredAmount 64, 0 deposited). Bot holds 64 `oak_lo
 State: HP 4, hunger 18, two skeleton archers + a zombie in melee at 1 block, no home reachable (escape-rejoin unavailable), inventory has 1 `chorus_fruit`, 1 `cooked_beef`.
 - Trigger: HP <= 6, melee within 3 blocks, no escape-rejoin -> `escape_teleport`. **Eat `minecraft:chorus_fruit`** (random teleport up to about 8 blocks, 32 ticks; HP <= 4 so the in-melee guard is relaxed).
 - Not chosen: cooked_beef (not in the escape tag list).
+
+---
+
+## Revision log (review pass 1)
+
+Note: an earlier reviser was interrupted; each finding below was re-checked against the text. "applied (earlier)" = already present, verified; the rest were applied in this pass.
+
+DECISIONS: D20 (honey_bottle follows normal hunger rules): applied (earlier) in section 1 always-edible row, 3.1 `always_edible`, 3.4 JSON `alwaysEdible`, section 2 verify list; no `honey_bottle` always-edible entry remains.
+
+- TABLES--completeness#1: changed (earlier). Milk bucket/potion note added to 3.3 and rows added to 4.6; values are `milk_bucket` 13 (bucket 12 + milk) and `potion` 3, not the 2 the finding suggests, since the bucket itself has value 12. Unused in Phase 3.
+- TABLES--completeness#2: changed (earlier). Config keys added in 4.2 as `config.combat.<camelCase>` (precision#7 wins over `config.value.*`; one key scheme only).
+- TABLES--completeness#3: applied (4.4 sentence earlier; Example 4 now names goto/defend/idle and states the held sword is counted once).
+- TABLES--completeness#4: applied (earlier in 3.1/Example 2; wording cleaned in this pass to a strict `distance > threshold` rule: at 10.0 blocks the bot does not eat).
+- TABLES--consistency#1: applied (earlier). 4.5 `gearValue` counts mainhand once via the 36 inventory slots; never added separately.
+- TABLES--game-api#1: applied (earlier). Honey removed from every always-edible list (section 1, 3.1, 3.4); verify list says "decided".
+- TABLES--game-api#2: applied (earlier). Fallback sentence added to the Section 2 verify list (also corrected to the 3.2 pufferfish rule: `hunger <= 2` and `hp >= 12`).
+- TABLES--logic#1: applied (earlier). Chicken tag is `avoid` only; `eligible()` admits `avoid` items only in `starving`.
+- TABLES--logic#2: applied (earlier). `golden_carrot` exclusion from `topup` in `eligible()` item (2).
+- TABLES--logic#3: applied (earlier). Same as consistency#1.
+- TABLES--logic#4: applied (earlier). 4.3.1 excludes mending's level from the sum (2.2 example).
+- TABLES--logic#5: applied (earlier). Example 2 recomputed after the apple (8.4 vs 6.0).
+- TABLES--logic#6: changed. Unused `stew` tag removed from the `starving` row and the 3.4 JSON; `emergency` kept (used in 3.3 as last choice). The `missing >= 2` clause is KEPT with an explanatory note (precision#5 wins: S2b lists `topupMinMissing`).
+- TABLES--precision#1: applied (earlier). Chicken row tags `avoid`; `eligible()` rule added; Example 3 now notes why `starving` holds.
+- TABLES--precision#2: applied (earlier). Same as consistency#1.
+- TABLES--precision#3: applied (earlier). Expected-net formula and chicken +0.875 in section 1.
+- TABLES--precision#4: applied (earlier). `fast_regen_active = hunger === 20 && saturation > 0`.
+- TABLES--precision#5: applied (earlier). Note in 3.1 `topup` trigger.
+- TABLES--precision#6: applied (earlier). `escape_teleport` trigger uses "holds no eligible item with tag `emergency`".
+- TABLES--precision#7: applied (earlier). 4.2 table has config key column (`config.combat.*`; four constants stay plain `const`s in `values.ts`).
+- TABLES--precision#8: applied (earlier). golden_apple and netherite_ingot notes say "design value".
+- TABLES--precision#9: applied (earlier). Decision added to the Section 4 verify list.
+- TABLES--precision#10: applied (earlier). Pseudo-effect placeholder sentence added to Section 2.

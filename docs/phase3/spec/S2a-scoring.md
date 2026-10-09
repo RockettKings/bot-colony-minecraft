@@ -4,9 +4,9 @@ Owner of: `Knowledge`, `FoodEntry`, `FoodTag`, `FoodEffect`, `ItemValueEntry`, `
 Not owned (read only): `Percept`, `SelfPercept`, `EntityPercept`, `ValueSummary` (S1 section 1), `MobEntry`, `TacticName`, `Condition` (S3 section 2), `FoodSituation`, `FoodChoice`, `Commit`, `Decision` (S2b), and the S2b keys `criticalHp`, `switchMargin` (decision D3: one definition, owned by S2b).
 Builder: **B1** (`scoring.ts`, pure: no `@minecraft/*`, no clock, no `Math.random`, no `Rng` call). **B2** transcribes the tables in sections 2 and 4 and the glue in `knowledge.ts`.
 
-Conventions: distances in blocks, times in ticks (20/s), HP in points, one pump = 4 ticks. Every `cfg.*` is a `config.combat` key (S1 section 10, S2b section 8, section 9 here). Scores are finite numbers in about [0, 1.7]; a larger score wins; S2b masks and breaks ties. Functions never mutate their arguments and are deterministic for equal inputs.
+Conventions: distances in blocks, times in ticks (20/s), HP in points, one pump = 4 ticks. Every `cfg.*` is a `config.combat` key (S1 section 10, S2b section 8, section 9 here). Scores are finite numbers in [0, 1.95] (the maximum is `escape_rejoin` at `escapeDrive` 1 and `valueWeight` 1; every other option is at most 1.3); a larger score wins; S2b masks and breaks ties. Functions never mutate their arguments and are deterministic for equal inputs.
 
-**Decisions this file implements:** D1 (`Knowledge` has `mob`, `food`, `value`), D2 (reads the optional Percept fields `canBlock`, `shieldDisabled`, `objectiveItemIds`; `terrain`, `tacticFeedback` and `EntityPercept.inWater` are used by S2b only), D3 (reads `criticalHp`), D20 (sharpness is not modelled, section 3.2).
+**Decisions this file implements:** D1 (`Knowledge` has `mob`, `food`, `value`), D2 (reads the optional Percept fields `canBlock`, `shieldDisabled`, `objectiveItemIds`; `terrain`, `tacticFeedback` and `EntityPercept.inWater` are used by S2b only), D3 (reads `criticalHp`; `switchMargin` is S2b's and is not read here), D20 (sharpness is not modelled, section 3.2), D22 (requests of section 10 accepted: `Percept.eating`, `computeValueSummary(inv, eq, objective, kb, cfg)`, `knowledge.ts`), D23 (`flee_if` mapping of section 5.1 and `canEatSafely` as the authoritative eat guard, section 8).
 
 ---
 
@@ -37,7 +37,7 @@ export interface ItemValueEntry { id: string; valuePerItem: number; category: It
 
 /** The only door to the data tables. Built once by B2 (`createKnowledge`, section 1.2) and passed to every pure function. */
 export interface Knowledge {
-  /** MOBS entry; never undefined: exact id, then variant, then Phase 5 stub (S3 `stubToEntry`), then the default entry. = S3 `lookupMob`. */
+  /** D1 accessor 1 of 3 (`mob`, `food`, `value` are the ones S2b uses; `category` is an S2a extra). MOBS entry; never undefined: exact id, then variant, then Phase 5 stub (S3 `stubToEntry`), then the default entry. = S3 `lookupMob`. */
   mob(typeId: string): MobEntry;
   /** FOOD row or undefined. = `foodEntry`. */
   food(typeId: string): FoodEntry | undefined;
@@ -82,8 +82,11 @@ export const MOB_ATTACK_INTERVAL_TICKS: Readonly<Record<string, number>>;     //
 export const SPEED_BY_CLASS: Readonly<Record<MoveSpeed, number>>;
 export const SPEED_OVERRIDE: Readonly<Record<string, number>>;
 export const ALWAYS_EDIBLE: readonly string[];
+export const clamp: (x: number, lo: number, hi: number) => number;
+export const sigmoid: (x: number) => number;
 ```
-Import direction: `scoring.ts` imports `evalCondition`/`CondEnv` from `stats.ts` (flee_if evaluation). `stats.ts` and `brain.ts` must not be imported by `sense.ts`/`values.ts`; `stats.ts` must NOT import `scoring.ts` (no cycle). `brain.ts` imports both.
+`ThreatEval`, `FoodPick` and `Derived` are exported from `types.ts` (section 1.4). `scoreOptions` reads the field `d.hasUsableShield`, never the function `hasUsableShield`. S2b imports `clamp`/`sigmoid` from here instead of duplicating them.
+Import direction: `scoring.ts` imports `evalCondition`/`CondEnv` from `stats.ts` (flee_if evaluation). `stats.ts` and `brain.ts` must not be imported by `sense.ts`/`values.ts`; `stats.ts` must NOT import `scoring.ts` (no cycle). `brain.ts` imports both. (D22, binding: `stats.ts` exports `evalCondition` and `CondEnv` and has no import of `scoring.ts`.)
 
 `computeValueSummary` replaces the S1 section 12 signature `computeValueSummary(inv, eq, objective?)`: it gains `kb` and `cfg` (S1 request, section 10). `StackLike = { typeId: string; amount: number; maxAmount?: number; durabilityFrac: number; enchantLevelSum?: number; mending?: boolean }` (`SlotItem` satisfies it).
 
@@ -138,7 +141,7 @@ export interface Derived {
   valueWeight: number;                   // deathCost / (deathCost + escapeValueHalf), 0..1
   retreatEff: number;                    // 0..1, section 3.9
   avoidPressure: number;                 // 0..1, section 3.10
-  hasUsableShield: boolean;
+  hasUsableShield: boolean;             // = hasUsableShield(p, cfg) && p.shieldDisabled !== true. scoreOptions reads this field, never the function
   fleeIfActive: boolean;                 // any relevant threat with fleeIf
   hunger: number;                        // self.hungerKnown ? self.hunger : 20
   starving: boolean; canRegen: boolean; hungerNeed: number; healWant: number;
@@ -181,6 +184,8 @@ export const SPEED_OVERRIDE: Readonly<Record<string, number>> = {
 export const ALWAYS_EDIBLE: readonly string[] = ["minecraft:golden_apple", "minecraft:enchanted_golden_apple", "minecraft:chorus_fruit", "minecraft:honey_bottle"];
 export const EMERGENCY_FOODS: readonly string[] = ["minecraft:enchanted_golden_apple", "minecraft:golden_apple"];   // S2b 5.2 order
 export const ATTACK_NEAR_BLOCKS = 3.5;                // S1 L1
+// Named literals of the formulas below. They are NOT config keys; change them here only.
+const RANGED_CLOSER_FACTOR = 0.5, RANGED_CLOSER_FROM = 3, REGEN_HUNGER = 18, DEFAULT_EAT_TICKS = 32, TIME_TO_DIE_NONE = 6000, FULL_HUNGER = 20, RETREAT_HORIZON_MULT = 2;
 ```
 Class speeds follow MOBS 1.2: `slow` is below the bot's sprint (0.28), `normal` equals it, `fast` exceeds it. Weapon damage is NOT a table here: use `weaponDamage` / `WEAPON_DAMAGE` (S1 6.5: fist 1 via `cfg.fistDamage`, wood and gold sword 4, stone 5, iron 6, diamond 7, netherite 8; axes 3/4/5/6/7 for wood and gold, stone, iron, diamond, netherite).
 
@@ -199,6 +204,7 @@ Sets: `T` = every entity with `classification === "threat"` and `distance <= cfg
 | `contactTicks` | `max(0, distance - reach) / speedBpt` | 0 when already in reach |
 | `proximity` | `clamp(1 - contactTicks / cfg.proxHorizonTicks, 0, 1)` | 1 = can hurt now, 0 = 60 or more ticks away |
 | `exposure` | `max(proximity)` over `R`, 0 if `R` is empty | |
+| `hostile12` / `sameType12` | `hostile12` = the number of entities with `classification === "threat"`, `relevance !== "irrelevant"` and `distance <= cfg.countRadius`, including the evaluated entity. `sameType12` = the same count restricted to `e.typeId`. | feed `CondEnv` for `flee_if` only |
 | `eatContactTicks` | `max(0, distance - eatReach) / max(speedBpt, cfg.eatGuardThreatSpeed / 20)`; `eatReach = ranged ? (LOS ? min(range, cfg.rangedEatReach) : cfg.noLosReach) : range` | the S2b eat-guard speed (5 b/s = 0.25 b/tick) is a floor: slow mobs count as 0.25 |
 
 ### 3.2 Bot offence
@@ -213,7 +219,7 @@ Sharpness and other enchants are not modelled (`enchantLevelSum` mixes all encha
 ### 3.3 Threat level (per mob) and `totalThreat`
 
 ```
-dEff        = max(0, distance - 0.5 * max(0, attack_range_blocks - 3))     // ranged mobs count as closer
+dEff        = max(0, distance - RANGED_CLOSER_FACTOR * max(0, attack_range_blocks - RANGED_CLOSER_FROM))   // 0.5, 3: ranged mobs count as closer
 falloff     = 1 / (1 + (dEff / cfg.threatHalfDist)^2)                      // 8 blocks -> 0.5
 vuln        = clamp(cfg.botRefHp / hpSafe, cfg.botVulnMin, cfg.botVulnMax) // danger is rated for a full-HP (20) bot; 6 HP -> 3.0 (cap)
 threatLevel = (danger / 10) * falloff * hpFrac * vuln                      // danger: MOBS 0..10; hpFrac: mob HP / entry HP
@@ -232,7 +238,7 @@ Armour: `armourReduction = min(cfg.armorReductionCap, max(0, totalArmor) * cfg.a
 | `dpsPerTick` | `explodes ? 0 : hit / interval * (ranged ? cfg.rangedHitRate : cfg.mobMeleeUptime)`; `interval = MOB_ATTACK_INTERVAL_TICKS[entry.id] ?? 20`. Melee uptime 0.6 covers knockback and re-approach after the bot's hits. |
 | `burst` (explodes only) | `rawHit * (isCharged ? cfg.chargedBurstMult : 1) * max(0, 1 - distance / blast) * (1 - armourReduction)`; `blast = cfg.blastReach * (isCharged ? 2 : 1)` (entity damage reaches about 6 blocks, MOBS creeper notes) |
 | `expectedIncomingDps` | `20 * sum(dpsPerTick * proximity)` over `R`, HP per second |
-| `timeToDieTicks` | `expectedIncomingDps > 0 ? hp * 20 / expectedIncomingDps : 6000` |
+| `timeToDieTicks` | `expectedIncomingDps > 0 ? hp * 20 / expectedIncomingDps : TIME_TO_DIE_NONE` (6000) |
 | `maxBurst` | `max(burst)` over `R`, 0 if none |
 
 ### 3.5 Time to kill
@@ -271,7 +277,7 @@ Both are 0 when no relevant threat can reach the bot within 60 ticks: a distant 
 
 ### 3.9 Retreat effectiveness
 
-`retreatEff = min over t in T with contactTicks <= 2 * cfg.proxHorizonTicks of ( classEff(t.moveClass) * (t.ranged && t.lineOfSight ? cfg.retreatRangedMult : 1) )`, 1 if no such `t`. `classEff`: slow `retreatEffSlow` 1.0, normal 0.8, fast 0.5. A sprinting bot gains distance on slow mobs only (MOBS 1.2); arrows hit a bot running in the open.
+`retreatEff = min over t in T with contactTicks <= RETREAT_HORIZON_MULT * cfg.proxHorizonTicks (2 * 60) of ( classEff(t.moveClass) * (t.ranged && t.lineOfSight ? cfg.retreatRangedMult : 1) )`, 1 if no such `t`. `classEff`: slow `retreatEffSlow` 1.0, normal 0.8, fast 0.5. A sprinting bot gains distance on slow mobs only (MOBS 1.2); arrows hit a bot running in the open.
 
 ### 3.10 Avoid pressure (the "avoid instead" signal)
 
@@ -283,7 +289,7 @@ Defaults: enderman 16, creeper 8, warden 30, phantom 0, others 6 (S3 `avoidRadiu
 
 ### 3.11 Food and `canEatSafely`
 
-`hunger = self.hungerKnown ? self.hunger : 20`. `starving = self.hungerKnown && hunger <= cfg.starvingHunger`. `canRegen = hunger >= 18` (TABLES 1: natural regen; also true when hunger is unknown). `hungerNeed = hungerKnown ? clamp((cfg.topupHungerMax - hunger) / (cfg.topupHungerMax - cfg.starvingHunger), 0, 1) : 0` (17 -> 0, 6 -> 1).
+`hunger = self.hungerKnown ? self.hunger : FULL_HUNGER` (20). `starving = self.hungerKnown && hunger <= cfg.starvingHunger`. `canRegen = hunger >= REGEN_HUNGER` (18) (TABLES 1: natural regen; also true when hunger is unknown). `hungerNeed = hungerKnown ? clamp((cfg.topupHungerMax - hunger) / (cfg.topupHungerMax - cfg.starvingHunger), 0, 1) : 0` (17 -> 0, 6 -> 1).
 
 Food picks (`Derived.food`; an estimate for scoring only, S2b `chooseFood` makes the real choice with its guards). Only stacks in `inventory.foods` with `amount >= 1` and a FOOD row; `edible = hunger < 20 || typeId in ALWAYS_EDIBLE`; objective ids (`p.objectiveItemIds ?? []`) are skipped except for `starve` and `emergency`; "plain" = no tag `avoid`, `emergency`, `escape`.
 - `heal`: S2b `pre_engage_heal`: the first tag of `[main, topup]` with an edible plain item; in it max `satGain` (`min(min(20, hunger + f.hunger), saturation + f.saturation) - saturation`), ties max `f.hunger`, then lower `kb.value`, then typeId.
@@ -292,15 +298,15 @@ Food picks (`Derived.food`; an estimate for scoring only, S2b `chooseFood` makes
 - `emergency`: the first held of `EMERGENCY_FOODS`.
 
 ```
-eatTicksRef        = (food.heal ?? food.starve ?? food.topup)?.eatTicks ?? 32
+eatTicksRef        = (food.heal ?? food.starve ?? food.topup)?.eatTicks ?? DEFAULT_EAT_TICKS     // 32
 eatNeedTicks       = p.eating ? p.eating.remainingTicks : eatTicksRef
 eatMarginTicks     = p.eating ? cfg.eatMidMealMarginTicks : cfg.eatSafetyMarginTicks           // 6 : 20
 minEatContactTicks = min(eatContactTicks) over ALL of T (relevance ignored), Infinity if T is empty
 canEatSafely       = minEatContactTicks > eatNeedTicks + eatMarginTicks                        // strict
 ```
-A full meal (32 ticks) needs the nearest threat to be 52 ticks from contact: a zombie (floor speed 0.25) needs `distance > 2 + 52 * 0.25 = 15` blocks. This is the same or stricter than S2b's guards (normal guard 10 blocks, `pre_engage_heal` contact 13 blocks); where S2b refuses a meal S2a scored as safe, S2b masks `eat` and the next-best option runs.
+A full meal (32 ticks) needs the nearest threat to be 52 ticks from contact: a zombie (floor speed 0.25) needs `distance > 2 + 52 * 0.25 = 15` blocks. This is stricter than S2b's former own guards (normal guard 10 blocks, `pre_engage_heal` contact 13 blocks). D23: S2b's eat guard calls `d.canEatSafely` (and `d.canEatEmergency` for the emergency situation) instead of its own threshold, so the two can no longer disagree. S2b may still refuse a meal for reasons S2a does not model (no eligible food, `eatBanUntil`); then it masks `eat` and the next-best option runs.
 `canEatEmergency = !(T has a melee (non-ranged) mob with distance <= cfg.eatMeleeBlockDist && hp > cfg.emergencyHpAnyThreat)` (S2b 5.2 emergency guard).
-`topupWanted = hungerKnown && hunger <= cfg.topupHungerMax && 20 - hunger >= cfg.topupMinMissing && T is empty && food.topup !== undefined` (S2b trigger 5).
+`topupWanted = hungerKnown && hunger <= cfg.topupHungerMax && 20 - hunger >= cfg.topupMinMissing && T is empty && food.topup !== undefined` (S2b trigger 5). S2a deliberately uses all threat-classified entities within `scanRadius` (any relevance): an irrelevant threat nearby suppresses a top-up meal and counts for the emergency triggers (survival bias). S2b section 5.1 builds `FoodContext.threats` from the same set (threat-classified, any relevance, `distance <= cfg.scanRadius`; the S2b reviser added the radius filter), so S2b's `Tany`/`T16` triggers and S2a's `topupWanted`/`emergencyEatWanted` agree.
 `emergencyEatWanted = food.emergency !== undefined && canEatEmergency && ((hp <= cfg.emergencyHp && some t in T has distance <= cfg.emergencyHostileRange) || (hp <= cfg.emergencyHpAnyThreat && T nonempty))` (S2b triggers 1).
 `healWant = (food.heal !== undefined || canRegen || (starving && food.starve !== undefined)) ? max(lowHp, starving ? 1 : 0) : 0`. The bot only wants to recover if eating or natural regeneration can actually do it.
 
@@ -352,8 +358,8 @@ export function computeValueSummary(
   return { gearValue, objectiveValue, otherCargoValue, otherCargoRaw, cargoValue, deathCost: gearValue + cargoValue };
 }
 ```
-Checks against TABLES 5: Example 4 (3 diamonds, 32 dirt, full iron, iron sword at 50 %): other `120 + 3.2 = 123.2`; gear `96 + 8 * 0.5 = 100`; `deathCost = 223.2`. Example 5 (16 `raw_iron` required 16, held 16, 3 diamonds, 20 cobblestone): `objectiveValue = 1000 * 16/16 = 1000`, other `120 + 2 = 122`. Holding 5: `1000 * 5/16 = 312.5`. Example 6 (80 logs, required 64): `1000`, surplus `16 * 0.5 = 8`.
-Reference bot used in section 7: iron sword 8 + shield 6 + iron armour (20 + 32 + 28 + 16 = 96) = `gearValue 110`, nothing enchanted, full durability.
+Checks against TABLES 5: Example 4 (3 diamonds, 32 dirt, full iron, iron sword at 50 %): other `120 + 3.2 = 123.2`; gear `96 + 8 * 0.5 = 100`; `deathCost = 223.2`. Example 5 (16 `raw_iron` required 16, held 16, 3 diamonds, 20 cobblestone): `objectiveValue = 1000 * 16/16 = 1000`, other `120 + 2 = 122`. Holding 5: `1000 * 5/16 = 312.5`. Example 6 (80 logs, required 64): `1000`, surplus `16 * 0.5 = 8`. Example 4 variant (chestplate Protection IV + Unbreaking III + Mending, iron sword at 50 %): `lv = 7`, `mult = min(3, 1 + 0.10 * 7 + 0.50) = 2.2`, chestplate `32 * 1.0 * 2.2 = 70.4`, `gearValue = 96 - 32 + 70.4 + 4 = 138.4`.
+Reference bot used in section 7: iron sword 8 + shield 6 + iron armour (20 + 32 + 28 + 16 = 96) = `gearValue 110`, nothing enchanted, full durability. In every example of section 7 `self.values` is an injected input, not recomputed from the listed food: `gearValue 110, otherCargoValue 0, objectiveValue 0, deathCost 110` unless the example states other values (examples 4 and 5 do). The food in examples 1, 2, 3, 11 and 12 is not priced.
 
 ---
 
@@ -366,9 +372,9 @@ Reference bot used in section 7: iron sword 8 + shield 6 + iron armour (20 + 32 
 | `attack` | `max over m in R, attackable, policyFactor(m) > 0 of need(m) * policyFactor(m) * (1 - rho)^attackRiskExp * hpFactor`; 0 if none. `need`: `threatensProtected` 1.1 (`needProtect`), `threatening_me` 1.0 (`needThreat`), `blocking_objective` 0.6 (`needBlock`). `hpFactor = attackHpFloor + (1 - attackHpFloor) * (1 - lowHp)` (0.2 at 6 HP or less, 1.0 at 14 HP or more) | 0 to 1.1 |
 | `shield` | `hasUsableShield && inbound ? shieldBase + shieldGain * max(u, threatPressure) : 0`. `inbound` = some `m` in `R` with (`targetingMe` or `hurtMe` or `distance <= shieldPersonalDist`) and (ranged: `lineOfSight && distance <= attackRange`; melee: `distance <= shieldReach`) | 0.25 to 0.75 |
 | `back_off` | `backOffWeight * avoidPressure^2` | 0 to 0.9 |
-| `retreat` | `T empty ? 0 : retreatEff * max(u, unsafeEat, forcedRetreat, burstFear)` where `unsafeEat = (healWant > 0 && !canEatSafely) ? unsafeEatDrive * healWant : 0`; `forcedRetreat = max(fleeIfScore * proximity)` over fleeIf mobs of policy `engage`/`engage_if_blocking`; `burstFear = max(burstRetreatWeight * clamp(burst / hpSafe, 0, 1.2))` over exploding mobs in `R` | 0 to 1.1 |
+| `retreat` | `T empty ? 0 : retreatEff * max(u, unsafeEat, forcedRetreat, burstFear)` where `unsafeEat = (healWant > 0 && !canEatSafely) ? unsafeEatDrive * healWant : 0`; `forcedRetreat = max(fleeIfScore * proximity)` over fleeIf mobs of policy `engage`/`engage_if_blocking`, skipping a mob for which `finishExempt(m)` holds; `burstFear = max(burstRetreatWeight * clamp(burst / hpSafe, 0, 1.2))` over exploding mobs in `R` | 0 to 1.1 |
 | `eat` | `max(topup, heal, starve, emergency)`: `topup = topupWanted ? topupBase + topupGain * hungerNeed : 0`; `heal = (food.heal && canEatSafely) ? eatGain * lowHp : 0`; `starve = (starving && food.starve && canEatSafely) ? starveScore : 0`; `emergency = emergencyEatWanted ? emergencyEatScore : 0` | 0 to 1.3 |
-| `flee` | `max(forcedFlee, policyFlee, urgFlee)`: `forcedFlee = max(fleeIfScore * proximity)` over fleeIf mobs of policy `avoid`/`flee`; `policyFlee = fleePolicyScore` if some `m` in `T` has policy `flee` and `distance <= fleePolicyRadius`; `urgFlee = (R nonempty && every m in R has policy avoid or flee) ? fleeUrgencyWeight * u : 0` | 0 to 1.2 |
+| `flee` | `max(forcedFlee, policyFlee, urgFlee)`: `forcedFlee = max(fleeIfScore * proximity)` over fleeIf mobs of policy `avoid`/`flee`, skipping a mob for which `finishExempt(m)` holds; `policyFlee = fleePolicyScore` if some `m` in `T` has policy `flee` and `distance <= fleePolicyRadius`; `urgFlee = (R nonempty && every m in R has policy avoid or flee) ? fleeUrgencyWeight * u : 0` | 0 to 1.2 |
 | `escape_rejoin` | `p.escapeAvailable ? escapeDrive * (escapeBase + escapeGain * valueWeight) : 0` | 0 to 1.95 |
 | `resume_task` | `p.taskKind !== undefined ? resumeBase * (1 - x) : 0` | 0 to 0.5 |
 | `idle` | `p.taskKind === undefined ? idleBase * (1 - x) : 0` | 0 to 0.1 |
@@ -385,7 +391,7 @@ Reference bot used in section 7: iron sword 8 + shield 6 + iron armour (20 + 32 
 | `attackAllowed === false` or outside leash and farther than 3.5 | `attackable` | attack 0 for that mob; it still counts for risk, shield, retreat, flee |
 | engage policy `flee` | `policyFactor` 0, `policyFlee` | attack 0, `flee` 1.2 within 32 blocks |
 | engage policy `avoid` | `policyFactor` | attack only if blocking and danger <= 5 (x0.6), or cornered (x0.5); else 0 |
-| `flee_if` holds | `fleeIf` | the withdrawal option is forced up: `retreat` (mobs that fight) or `flee` (mobs with policy avoid/flee) get `1.1 * proximity`, a distant mob forces nothing |
+| `flee_if` holds (unless `finishExempt(m)`) | `fleeIf` | the withdrawal option is forced up: `retreat` (mobs that fight) or `flee` (mobs with policy avoid/flee) get `1.1 * proximity`, a distant mob forces nothing |
 
 `flee_if` mapping: MOBS 1.2 says flee_if switches to `retreat_and_regen`, `sprint_away` or `flee_sneak` "per the entry's tactics". The brain has two options for that: `retreat` runs `retreat_and_regen`, `flee` runs `sprint_away`/`flee_sneak` (S2b `TACTIC_CLASS`). Rule: policy `engage`/`engage_if_blocking` entries map to `retreat` (they never list `sprint_away`), policy `avoid`/`flee` entries map to `flee`.
 
@@ -399,6 +405,8 @@ Reference bot used in section 7: iron sword 8 + shield 6 + iron armour (20 + 32 
 | 300 | 0.500 | 1.15 | 1.15 | 1.1 | escape (barely) |
 | 610 (kit + 500 of rares) | 0.670 | 1.42 | 1.42 | 1.1 | escape |
 | 1110 (kit + 64/64 diamonds) | 0.787 | 1.61 | 1.61 | 1.1 | escape |
+
+The table assumes `retreatEff` 1.0 (a slow melee mob such as a zombie, `forcedRetreat` 1.1). Against shooters with line of sight `retreatEff` is 0.64 and retreat falls to 0.704, so escape wins in all four rows (example 4).
 
 So "low HP plus cheap cargo" fights or retreats locally, "low HP plus objective or valuable cargo" escapes. There is no time term: the score does not know when the last escape was. `p.escapeAvailable === false` (the snapshot service refused, S1 3.6) gives 0, and the brain re-runs without it.
 
@@ -454,7 +462,7 @@ function evalThreat(e: EntityPercept, p: Percept, kb: Knowledge, cfg: CombatConf
   const contactTicks = Math.max(0, e.distance - reach) / speedBpt;
   const eatReach = ranged ? (e.lineOfSight ? Math.min(entry.attack_range_blocks, cfg.rangedEatReach) : cfg.noLosReach) : entry.attack_range_blocks;
   const eatContactTicks = Math.max(0, e.distance - eatReach) / Math.max(speedBpt, cfg.eatGuardThreatSpeed / 20);
-  const hpNow = e.hp ?? entry.hp, hpFrac = clamp(hpNow / entry.hp, 0, 1);
+  const hpNow = e.hp ?? entry.hp, hpFrac = entry.hp > 0 ? clamp(hpNow / entry.hp, 0, 1) : 1;   // MOBS invariant: hp > 0 (B2 test)
   const rawHit = entry.attack_damage[g.diff];
   const hit = entry.special.includes("ignores_armor") ? rawHit : rawHit * (1 - g.red);
   const interval = MOB_ATTACK_INTERVAL_TICKS[entry.id] ?? ATTACK_INTERVAL_DEFAULT;
@@ -462,7 +470,7 @@ function evalThreat(e: EntityPercept, p: Percept, kb: Knowledge, cfg: CombatConf
   const attackable = e.attackAllowed && (e.inLeash || e.distance <= ATTACK_NEAR_BLOCKS);
   const killTicks = Math.ceil(hpNow / g.botDmg) * cfg.attackSpacingTicks / cfg.meleeHitRate
     + (ranged ? Math.ceil(Math.max(0, e.distance - cfg.ttkReach) / cfg.sprintBlocksPerTick) : 0);
-  const dEff = Math.max(0, e.distance - 0.5 * Math.max(0, entry.attack_range_blocks - 3));
+  const dEff = Math.max(0, e.distance - RANGED_CLOSER_FACTOR * Math.max(0, entry.attack_range_blocks - RANGED_CLOSER_FROM));
   const threatLevel = entry.danger / 10 / (1 + (dEff / cfg.threatHalfDist) ** 2) * hpFrac * g.vuln;
   const blast = cfg.blastReach * (e.isCharged ? 2 : 1);
   const burst = explodes ? rawHit * (e.isCharged ? cfg.chargedBurstMult : 1) * Math.max(0, 1 - e.distance / blast) * (1 - g.red) : 0;
@@ -484,10 +492,10 @@ function pickFoods(p: Percept, kb: Knowledge, hunger: number, cfg: CombatConfig)
   const rows: Array<{ i: SlotItem; f: FoodEntry }> = [];
   for (const i of s.inventory.foods) { const f = kb.food(i.typeId); if (f && i.amount >= 1) rows.push({ i, f }); }
   const pick = (r: { i: SlotItem; f: FoodEntry }): FoodPick => ({ typeId: r.i.typeId, slot: r.i.slot, eatTicks: r.f.eatTicks, hunger: r.f.hunger, saturation: r.f.saturation });
-  const edible = (r: { i: SlotItem }) => hunger < 20 || ALWAYS_EDIBLE.includes(r.i.typeId);
+  const edible = (r: { i: SlotItem }) => hunger < FULL_HUNGER || ALWAYS_EDIBLE.includes(r.i.typeId);
   const plain = (r: { f: FoodEntry }) => !r.f.tags.some(t => t === "avoid" || t === "emergency" || t === "escape");
   const free = (r: { i: SlotItem }) => !obj.includes(r.i.typeId);
-  const gain = (f: FoodEntry) => Math.min(Math.min(20, hunger + f.hunger), s.saturation + f.saturation) - s.saturation;
+  const gain = (f: FoodEntry) => Math.min(Math.min(FULL_HUNGER, hunger + f.hunger), s.saturation + f.saturation) - s.saturation;
   const best = (rs: typeof rows, cmp: (a: typeof rows[0], b: typeof rows[0]) => number) =>
     rs.length === 0 ? undefined : pick([...rs].sort((a, b) => cmp(a, b) || (a.i.typeId < b.i.typeId ? -1 : 1))[0]);
   let heal: FoodPick | undefined;
@@ -541,7 +549,7 @@ export function computeDerived(p: Percept, kb: Knowledge, cfg: CombatConfig): De
 
   // 3.9, 3.10
   const classEff: Record<MoveSpeed, number> = { slow: cfg.retreatEffSlow, normal: cfg.retreatEffNormal, fast: cfg.retreatEffFast };
-  const retreatEff = threats.filter(t => t.contactTicks <= 2 * cfg.proxHorizonTicks)
+  const retreatEff = threats.filter(t => t.contactTicks <= RETREAT_HORIZON_MULT * cfg.proxHorizonTicks)
     .reduce((a, t) => Math.min(a, classEff[t.moveClass] * (t.ranged && t.lineOfSight ? cfg.retreatRangedMult : 1)), 1);
   let avoidPressure = 0;
   for (const e of p.entities) {
@@ -554,13 +562,13 @@ export function computeDerived(p: Percept, kb: Knowledge, cfg: CombatConfig): De
   }
 
   // 3.11 food
-  const hunger = s.hungerKnown ? s.hunger : 20;
+  const hunger = s.hungerKnown ? s.hunger : FULL_HUNGER;
   const starving = s.hungerKnown && hunger <= cfg.starvingHunger;
-  const canRegen = hunger >= 18;
+  const canRegen = hunger >= REGEN_HUNGER;
   const hungerNeed = s.hungerKnown ? clamp((cfg.topupHungerMax - hunger) / (cfg.topupHungerMax - cfg.starvingHunger), 0, 1) : 0;
   const food = pickFoods(p, kb, hunger, cfg);
   const healWant = (food.heal !== undefined || canRegen || (starving && food.starve !== undefined)) ? Math.max(lowHp, starving ? 1 : 0) : 0;
-  const eatTicksRef = (food.heal ?? food.starve ?? food.topup)?.eatTicks ?? 32;
+  const eatTicksRef = (food.heal ?? food.starve ?? food.topup)?.eatTicks ?? DEFAULT_EAT_TICKS;
   const eatNeedTicks = p.eating ? p.eating.remainingTicks : eatTicksRef;
   const eatMarginTicks = p.eating ? cfg.eatMidMealMarginTicks : cfg.eatSafetyMarginTicks;
   const minEatContactTicks = threats.reduce((a, t) => Math.min(a, t.eatContactTicks), Infinity);
@@ -570,7 +578,7 @@ export function computeDerived(p: Percept, kb: Knowledge, cfg: CombatConfig): De
     difficulty, armourReduction: red, hpSafe, threats, totalThreat, threatPressure: 1 - Math.exp(-totalThreat), exposure,
     botWeaponDamage: botDmg, botOffenceDps: botDmg * 20 / cfg.attackSpacingTicks * cfg.meleeHitRate,
     expectedIncomingDps, timeToKillTicks: clock,
-    timeToDieTicks: expectedIncomingDps > 0 ? s.hp * 20 / expectedIncomingDps : 6000,
+    timeToDieTicks: expectedIncomingDps > 0 ? s.hp * 20 / expectedIncomingDps : TIME_TO_DIE_NONE,
     hasUnkillable, expectedDamage, damageRatio, maxBurst, deathRisk, lowHp,
     urgency: exposure * Math.max(deathRisk, lowHp),
     escapeDrive: exposure * Math.max(lowHp, cfg.escapeRiskWeight * deathRisk),
@@ -578,7 +586,7 @@ export function computeDerived(p: Percept, kb: Knowledge, cfg: CombatConfig): De
     valueWeight, retreatEff, avoidPressure, hasUsableShield: shield && p.shieldDisabled !== true, fleeIfActive: rel.some(m => m.fleeIf),
     hunger, starving, canRegen, hungerNeed, healWant, food, eatTicksRef, eatNeedTicks, eatMarginTicks, minEatContactTicks,
     canEatSafely: minEatContactTicks > eatNeedTicks + eatMarginTicks, canEatEmergency,
-    topupWanted: s.hungerKnown && hunger <= cfg.topupHungerMax && 20 - hunger >= cfg.topupMinMissing && threats.length === 0 && food.topup !== undefined,
+    topupWanted: s.hungerKnown && hunger <= cfg.topupHungerMax && FULL_HUNGER - hunger >= cfg.topupMinMissing && threats.length === 0 && food.topup !== undefined,
     emergencyEatWanted: food.emergency !== undefined && canEatEmergency
       && ((s.hp <= cfg.emergencyHp && threats.some(t => t.distance <= cfg.emergencyHostileRange)) || (s.hp <= cfg.emergencyHpAnyThreat && threats.length > 0)),
   };
@@ -696,7 +704,7 @@ Eat wins. S2b `chooseEat` must also pass: its `pre_engage_heal` contact test nee
 | **0.581** | 0.500 | 0.000 | 0.500 | 0.000 | 0.000 | 0.390 | 0.000 | 0.000 |
 
 The meal is abandoned and the bot fights (S2b H3 also fires: a threat within 3 blocks interrupts a non-emergency meal).
-- 3b. Zombie still at 9.0, `remainingTicks 10`: `eatContactTicks = (9 - 2) / 0.25 = 28 > 10 + 6 = 16`, safe: `eat = 1.3 * 0.5 = 0.650` beats `attack 0.593`, `resume_task 0.292`, `retreat 0.208`. The meal is finished. Without the `eating` field the guard is `28 > 32 + 20` (false): eat 0 and the bot would drop the meal (Open question Q3).
+- 3b. Zombie still at 9.0, `remainingTicks 10`: `eatContactTicks = (9 - 2) / 0.25 = 28 > 10 + 6 = 16`, safe: `eat = 1.3 * 0.5 = 0.650` beats `attack 0.589`, `resume_task 0.292`, `retreat 0.208`. The meal is finished. Without the `eating` field the guard is `28 > 32 + 20` (false): eat 0 and the bot would drop the meal (Open question Q3).
 
 ### Example 4: 64/64 requested diamonds, HP 5, 2 skeletons at 10 and 11 blocks (hunger 18, no food)
 - Values: `objectiveValue = 1000 * min(64, 64) / 64 = 1000`; diamonds are objective items (never also other cargo), surplus 0; `deathCost = 110 + 1000 = 1110`, `valueWeight = 1110 / 1410 = 0.787`.
@@ -771,7 +779,7 @@ Examples 1, 2, 10 are the retreat, eat, fight chain with no scripted transition.
 |---|---|---|---|---|---|---|---|---|
 | 0.000 | 0.000 | 0.000 | 0.800 | **1.200** | 0.000 | 0.260 | 0.333 | 0.000 |
 
-(S2b `chooseFood("emergency")` returns the golden apple; this matches S2b example E5.)
+(S2b `chooseFood("emergency")` returns the golden apple; this matches S2b section 7, example E5, bullet "emergency".)
 
 ### Example 12: top-up (HP 20, hunger 14, saturation 2, 5 bread, no threats)
 - `topupWanted`: `14 <= 17`, `20 - 14 = 6 >= 2`, `T` empty, bread is `topup`. `hungerNeed = (17 - 14) / 11 = 0.273`; `eat = 0.55 + 0.35 * 0.273 = 0.645` beats `resume_task 0.5`. At hunger 17: `0.55 + 0 = 0.55` still wins; at hunger 18 `topupWanted` is false.
@@ -786,7 +794,7 @@ Examples 1, 2, 10 are the retreat, eat, fight chain with no scripted transition.
 
 | Consumer | Uses | Contract |
 |---|---|---|
-| S2b `decide` | `computeDerived(p, kb, cfg)` once per pump, then `scoreOptions(p, d, kb, cfg)` | Returns `OptionScores`; S2b reads no `Derived` field (its S2b section 0). S2b masks, applies `criticalHp`, `switchMargin`, commitment. |
+| S2b `decide` | `computeDerived(p, kb, cfg)` once per pump, then `scoreOptions(p, d, kb, cfg)` | Returns `OptionScores`. S2b reads exactly two `Derived` fields, `d.canEatSafely` and `d.canEatEmergency` (D23: its eat guard calls them, it has no threshold of its own; see section 3.11); everything else it takes from `OptionScores`. S2b masks, applies `criticalHp`, `switchMargin`, commitment. |
 | S2b `mobOf` / `foodOf` / `valueOf` | `kb.mob`, `kb.food`, `kb.value` (D1) | `kb.value(typeId)` with one argument is valid. |
 | S2b `botHasShield` | `hasUsableShield` | Same body, word for word; S2b imports it instead of keeping a copy. |
 | S1 sensor | `computeValueSummary(inv, eq, objective, kb, cfg)` into `SelfPercept.values` | `objective = { ids: hint.items.ids, required: hint.items.required }` from the executor's `ObjectiveHint` (gather only); `undefined` otherwise. Recomputed on every inventory or equipment change, at most once per scan. |
@@ -799,6 +807,10 @@ Examples 1, 2, 10 are the retreat, eat, fight chain with no scripted transition.
 
 ### 9.1 Type (`CombatConfig` is the union of S1 section 10, S2b section 8 and this interface; the contract writer merges them)
 
+S1 section 10 names its interface `CombatConfigS1`, S2b section 8 names its interface `CombatConfigS2b`; the contract writer creates both (S1 and S2b revisers apply the naming). In `types.ts`:
+```ts
+export type CombatConfig = CombatConfigS1 & CombatConfigS2b & CombatConfigS2a;
+```
 ```ts
 export interface CombatConfigS2a {
   // damage model
@@ -893,6 +905,8 @@ Keys read but owned elsewhere: S1 `scanRadius`; S2b `criticalHp`, `attackSpacing
 | `resumeBase` | 0.5 | score | Resume-task score with no exposure |
 | `idleBase` | 0.1 | score | Idle score with no exposure and no task |
 
+Invariants checked by `config.test.ts`: `lowHpStart > criticalHp`, `topupHungerMax > starvingHunger`, `otherCargoCap < objFull`, `botVulnMin <= botVulnMax`, `armorReductionCap <= 1`, every `*Rate`/`*Frac` in [0, 1], `proxHorizonTicks > 0`, `threatHalfDist > 0`, `blastReach > 0`, `attackSpacingTicks > 0`, `meleeHitRate > 0`.
+
 ---
 
 ## 10. Requests to other sections
@@ -901,7 +915,7 @@ Keys read but owned elsewhere: S1 `scanRadius`; S2b `criticalHp`, `attackSpacing
 |---|---|
 | S1 / contract writer | Add `Percept.eating?: { typeId: string; remainingTicks: number }` (section 1.5), filled from the combat body's meal state. Change the S1 section 12 signature to `computeValueSummary(inv, eq, objective, kb, cfg)` (section 4); call it from the sensor with `objective = { ids: hint.items.ids, required: hint.items.required }`. |
 | S1 | `SelfPercept.values` stays required; `ValueSummary` fields are exactly those S2a section 4 returns. |
-| S2b | `evalCondition` and `CondEnv` must be exported from `stats.ts`, and `stats.ts` must not import `scoring.ts`. Import `hasUsableShield` instead of re-implementing `botHasShield`. In `chooseEat`, a committed meal (`s.commit.option === "eat"` with `stillHeld` food) should bypass the new-meal guard (`dn > eatTicks / 20 * 5 + 2`), otherwise step 7 masks `eat` mid-meal although S2a scored it safe with the shorter `eatMidMealMarginTicks`. `FoodEntry.effects` is `FoodEffect[]`: test poison with `f.effects.some(e => e.id === "poison")`. |
+| S2b | `evalCondition` and `CondEnv` must be exported from `stats.ts`, and `stats.ts` must not import `scoring.ts`. Import `hasUsableShield` instead of re-implementing `botHasShield`. In `chooseEat`, a committed meal (`s.commit.option === "eat"` with `stillHeld` food) should bypass the new-meal guard (`dn > eatTicks / 20 * 5 + 2`), otherwise step 7 masks `eat` mid-meal although S2a scored it safe with the shorter `eatMidMealMarginTicks`. `FoodEntry.effects` is `FoodEffect[]`: test poison with `f.effects.some(e => e.id === "poison")`. D23: the eat guard (`chooseEat`, `chooseFood` safety tests) reads `d.canEatSafely` / `d.canEatEmergency` from `computeDerived`; the S2b thresholds 10 and 13 blocks are removed. |
 | S3 | `retreat` runs `retreat_and_regen`, `flee` runs `sprint_away`/`flee_sneak` (as S2b `TACTIC_CLASS`); S3 needs no change. `config.body.avoidRadius` and `config.combat.backOffRadius` must carry the same values (S3 uses its own for pathing). |
 | Reconciler / PHASE3-SPEC | Add `knowledge.ts` to the B2 file list. PHASE3-SPEC 4: `Decision` lives in S2b, `Knowledge` and `Derived` in S2a. |
 | S6 | Cases of section 11. |
@@ -917,7 +931,7 @@ Keys read but owned elsewhere: S1 `scanRadius`; S2b `criticalHp`, `attackSpacing
 | Q5 | No option "rest before resuming" exists for a calm bot at low HP. | `eat` covers recovery when food exists (score up to 1.3 beats `resume_task` 0.5); with no food and no threat the bot resumes (S1 RECOVER only follows an escape). |
 | Q6 | Sequential-kill damage assumes mobs arrive in contact order and are killed in that order; S2b picks targets differently. | `expectedDamage` is an estimate for risk only; being too pessimistic by a factor under 2 is accepted. |
 | Q7 | Sharpness and other enchants raise the bot's damage but `enchantLevelSum` cannot isolate them. | Ignored (D20); weapon damage comes from `weaponDamage` of the item type. |
-| Q8 | `canEatSafely` is stricter than S2b's guard (about 15 vs 10 blocks for a zombie). | Accepted: S2b masks `eat` when its guard fails, S2a never lets `eat` win when its own guard fails. The stricter rule wins for new meals. |
+| Q8 | `canEatSafely` is stricter than S2b's former guard (about 15 vs 10 blocks for a zombie). | Resolved by D23: S2b calls `d.canEatSafely`. One guard, S2a's. |
 | Q9 | The escape multiplier at deathCost 300 only barely beats a forced retreat (1.15 vs 1.1). | Intended crossover near 300; tune `escapeGain` / `escapeValueHalf`. |
 | Q10 | The default hostile entry has `danger 6`, policy `avoid` and range 3. | Used unchanged: an unknown mob is never attacked (6 > `avoidAttackMaxDanger` 5) unless it is cornering the bot (section 5). |
 | Q11 | Slimes and magma cubes split on death; the children's kill time is not modelled. | Ignored; the outcome logs (S2b) capture the real cost per tactic. |
@@ -929,7 +943,33 @@ Keys read but owned elsewhere: S1 `scanRadius`; S2b `criticalHp`, `attackSpacing
 - `computeValueSummary`: the five TABLES 5 checks of section 4 (223.2; 1000 and 122; 312.5; logs 1000 + 8; enchanted chestplate 70.4); mainhand not counted twice; an objective item never counts as gear; `required 0` makes all held objective items ordinary cargo; `otherCargoCap` binds at 900.
 - `computeDerived`: examples 1 to 12 of section 7, field by field (`expectedDamage 14.10`, `deathRisk 0.851`, `burst 13.04`, `avoidPressure 0.375`, `minEatContactTicks 8 / 72 / 28`, `valueWeight 0.268 / 0.787`).
 - `computeDerived` edge cases: no entities (everything 0, `timeToDieTicks 6000`, `canEatSafely` true); `hungerKnown false` (hunger 20, `topupWanted` false, only always-edible foods picked); an unkillable mob (warden, `attackAllowed` false) sets `hasUnkillable` and uses the 200-tick horizon; baby zombie speed 0.30; Peaceful reads as Normal.
-- `scoreOptions`: examples 1 to 12 (all nine scores, 3 decimals); `neutral_unprovoked`/`never_target`/`ignore` entities never produce attack; irrelevant threat gives attack 0; `engage_policy flee` gives attack 0 and flee 1.2 within 32 blocks; avoid mob blocking with danger 4 gives x0.6, danger 8 gives 0, cornered gives x0.5; `escapeAvailable false` gives escape 0; no NaN or Infinity for `hp 0` or an empty percept; scoring is deterministic (two calls equal); inputs are not mutated.
-- Escape rule: sweep `deathCost` 113, 300, 610, 1110 at HP 5 with the same 2 skeletons: winner retreat, escape, escape, escape (section 5.2 table).
+- `scoreOptions`: examples 1 to 12 (all nine scores, 3 decimals; examples inject `values`, they are not derived from the inventory); `neutral_unprovoked`/`never_target`/`ignore` entities never produce attack; irrelevant threat gives attack 0; `engage_policy flee` gives attack 0 and flee 1.2 within 32 blocks; avoid mob blocking with danger 4 gives x0.6, danger 8 gives 0, cornered gives x0.5; `escapeAvailable false` gives escape 0; no NaN or Infinity for `hp 0` or an empty percept; scoring is deterministic (two calls equal); inputs are not mutated.
+- Escape rule: HP 5, one zombie at 2.0 blocks (`contactTicks` 0, `proximity` 1, `retreatEff` 1.0, `forcedRetreat` 1.1), `deathCost` 113, 300, 610, 1110 injected through `self.values`. Escape scores 0.788 / 1.150 / 1.422 / 1.609. Retreat is 1.100 in all four. Winners: retreat, escape_rejoin, escape_rejoin, escape_rejoin. The same sweep with the 2 skeletons of example 4 gives escape_rejoin in all four rows (retreat 0.704, shield 0.750).
 - Emergence: sequence examples 1, 2, 10 with `argmax`: retreat, eat, attack.
 - No cooldown: two consecutive calls with identical inputs return identical escape scores (no hidden state).
+
+---
+
+## Revision log (review pass 1)
+
+Review file `S2a-scoring--precision.md` (abbreviated `precision`) and DECISIONS rows D1, D3, D22, D23.
+
+- precision#1: applied (section 12 escape sweep rewritten with the one-zombie case, winners retreat / escape / escape / escape; the 2-skeleton sweep gives escape in all four rows; a matching note added under the section 5.2 table, which assumes `retreatEff` 1.0)
+- precision#2: applied (section 7 reference-bot paragraph and section 12 `scoreOptions` bullet: `self.values` is injected, listed food is not priced)
+- precision#3: applied (example 3b `attack 0.589`; rest of 3b rechecked: `contactTicks` 35, `proximity` 0.417, `resume_task` 0.292, `retreat` 0.208)
+- precision#4: applied (header range `[0, 1.95]`)
+- precision#5: applied (70.4 chestplate case appended to the section 4 checks; sword at 50 % as in TABLES 5 example 4, so `gearValue` 138.4)
+- precision#6: changed (reference replaced by "S2b section 7, example E5, bullet emergency"; S2b has exactly that heading)
+- precision#7: changed (the finding assumed S2b's `Tany`/`T16` were relevant-only; S2b 5.1 `FoodContext.threats` is any-relevance already. Text added in 3.11 stating the any-relevance choice; S2b filters by `scanRadius` so both sets are equal)
+- precision#8: applied (`hostile12`/`sameType12` row in section 3.1; relevant threats within `countRadius`, matching the code of section 6)
+- precision#9: applied (`finishExempt` named in the `retreat` and `flee` formulas and in the 5.1 `flee_if` row)
+- precision#10: applied (`clamp`/`sigmoid` in the 1.3 export list; types export sentence; `scoreOptions` reads `d.hasUsableShield`)
+- precision#11: applied (`CombatConfig = CombatConfigS1 & CombatConfigS2b & CombatConfigS2a`; naming requested from the S1 and S2b revisers)
+- precision#12: applied (seven named literals in section 2; section 3 text and section 6 code use them; not config keys)
+- precision#13: applied (invariant list after the 9.2 table, checked by `config.test.ts`)
+- precision#14: applied (`hpFrac` guarded for `entry.hp <= 0`; B2 test list gets the MOBS invariant `hp > 0`)
+- precision#15: applied (`Derived.hasUsableShield` comment; 1.3 sentence)
+- D1: applied (`Knowledge` already has `mob`, `food`, `value`; `category` is the only extra, commented as such)
+- D3: applied (header and decisions line: `criticalHp` is read, `switchMargin` is not read here; both defined once in S2b section 8)
+- D22: applied (decisions line; import-direction sentence; the section 10 requests stand as accepted; `knowledge.ts` is added to PHASE3-SPEC 6 by the Lead)
+- D23: applied (section 3.11 and 8: S2b calls `d.canEatSafely` and `d.canEatEmergency`, so the two guards cannot differ; Q8 marked resolved; section 10 S2b row names the removal of S2b's own thresholds)

@@ -84,6 +84,7 @@
 | block below feet | `getBlockStandingOn(options?: GetBlocksStandingOnOptions): Block \| undefined` | S:10018 | throws. undefined while flying or jumping. |
 | on fire | `getComponent('minecraft:onfire')` returns `EntityOnFireComponent`, `.onFireTicksRemaining: number` | S:12958, S:12965 | The component is absent when the entity isn't burning. |
 | riding | `getComponent('minecraft:riding')` returns `.entityRidingOn: Entity` | S:13449, S:13457 | Detects spider and chicken jockeys. |
+| dimension | `readonly dimension: Dimension` | S:9470 | throws (EngineError, InvalidEntityError), stable. Throws if the entity is invalid. Used by the sensor and the escape flow. |
 
 **Probe?** No.
 
@@ -95,10 +96,10 @@
   - It's beta, so wrap it in the adapter and expect it to vanish or change.
   - It's unverified whether it reports a SimulatedPlayer as a target, and how quickly it updates.
   - Neutral mobs (enderman, spider in daylight) have no target until they're provoked.
-- **Fallback proxy (always compute it as well):** `mob_aggroed_on_bot` is true if any of these holds:
-  - `entityHurt` / `entityHitEntity` reported this mob damaging or hitting the bot in the last N ticks, OR
-  - the mob is hostile (`families` includes `monster`), within 16 blocks, and its distance to the bot fell over the last ~20 ticks, OR
-  - `target?.id === bot.id`.
+- **Fallback proxy (always compute it as well):** `mob_aggroed_on_bot` is true if any of these holds. The numbers live only in S1 §10 (`config.combat.*`); this section must not repeat them:
+  - (a) `target?.id === bot.id`, OR
+  - (b) this mob hurt or hit the bot (`entityHurt` / `entityHitEntity`) within `config.combat.provokeMemoryTicks`, OR
+  - (c) the mob is classified `threat`, its distance to the bot is <= `config.combat.approachRadius` (6 blocks), and it **moved toward the bot** by >= `config.combat.approachMinDelta` since the previous scan, at most 20 ticks earlier. Use the mob's own displacement, so the bot's own movement does not count: `dist3(prev.mobPos, self.posNow) - distance >= approachMinDelta`, where `prev.mobPos` is the mob's position at the previous scan and `self.posNow` and `distance` are current. (S1 §5.3 currently writes `prev.dist - distance`, which also counts the bot's own movement; S1 must adopt this form.)
 - **Probe?** **Yes.** Does `mob.target` return the SimulatedPlayer for a zombie chasing it? Is it undefined for a passive or neutral mob?
 
 ### A6. Creeper ignition and charged state
@@ -133,7 +134,7 @@
 | Call | Line | Notes |
 |---|---|---|
 | `Dimension.getBlockFromRay(location: Vector3, direction: Vector3, options?: BlockRaycastOptions): BlockRaycastHit \| undefined` | S:8421 | throws. Hit fields: `block` S:26200, `face` S:26206, `faceLocation` S:26213. |
-| `Dimension.getEntitiesFromRay(location: Vector3, direction: Vector3, options?: EntityRaycastOptions): EntityRaycastHit[]` | S:8564 | throws (EngineError, InvalidArgument, InvalidEntity, UnsupportedFunctionality). Hit fields: `distance` S:27379, `entity` S:27385. |
+| `Dimension.getEntitiesFromRay(location: Vector3, direction: Vector3, options?: EntityRaycastOptions): EntityRaycastHit[]` | S:8564 | throws (EngineError, InvalidArgument, InvalidEntity, UnsupportedFunctionality). Hit fields: `distance` S:27379, `entity` S:27385. **The result includes the origin entity (the bot itself) when the ray starts inside its box; filter out `hit.entity.id === self.id`.** |
 | `Entity.getBlockFromViewDirection(options?: BlockRaycastOptions): BlockRaycastHit \| undefined` | S:10001 | throws |
 | `Entity.getEntitiesFromViewDirection(options?: EntityRaycastOptions): EntityRaycastHit[]` | S:10137 | throws |
 
@@ -152,7 +153,7 @@
 ### A9. Light, time, weather, difficulty
 | Action | Call | Line | Stability |
 |---|---|---|---|
-| Block light (total) | `Dimension.getLightLevel(location: Vector3): number` | S:8600 | stable, throws (InvalidArgument, LocationInUnloadedChunk) |
+| Total light (block and sky) | `Dimension.getLightLevel(location: Vector3): number` | S:8600 | stable, throws (InvalidArgument, LocationInUnloadedChunk). The d.ts says only "total brightness level of light shining on a certain block position". |
 | Sky light | `Dimension.getSkyLightLevel(location: Vector3): number` | S:8633 | stable, throws |
 | (Block variants) | `Block.getLightLevel(): number` S:4345, `Block.getSkyLightLevel(): number` S:4397 | | NRE. Prefer the Dimension versions. |
 | Time of day | `World.getTimeOfDay(): number` (0–24000) | S:24389 | stable |
@@ -162,7 +163,9 @@
 | Difficulty | `World.getDifficulty(): Difficulty` (`Easy`/`Hard`/`Normal`/`Peaceful`, S:500) | S:24220 | stable |
 | Ticks per day | `const TicksPerDay = 24000` S:29696; `TicksPerSecond = 20` S:29702 | | stable |
 
-**Probe?** No. `is_daylight` is computed from time plus sky light. `is_thunderstorm` uses `getWeather()` (beta), so wrap it and default to false.
+**Light semantics (unverified, D18).** The d.ts does not say whether the sky component of `getLightLevel` is attenuated at night (it may stay 15 under open sky at midnight). Specs must not use `getLightLevel` alone for a daylight decision. `isDaylight` comes from `World.getTimeOfDay()` (default: `t < 12000 || t >= 23000`, i.e. before `TimeOfDay.Sunset` or from `TimeOfDay.Sunrise`, S:2986). A spider is neutral only when `isDaylight && lightLevel >= config.combat.spiderNeutralLight` (12); unknown light is treated as hostile.
+
+**Probe?** **Yes: P15 (light semantics).** `is_thunderstorm` uses `getWeather()` (beta), so wrap it and default to false.
 
 ### A10. Effects
 | Action | Call | Line |
@@ -172,7 +175,7 @@
 | Effect fields | `amplifier: number` S:9137 (0 = level I), `duration: number` S:9154 (ticks), `typeId: string` S:9168, `displayName` S:9144, `isValid` S:9161 | stable |
 | Validate an id | `EffectTypes.get(identifier: string): EffectType \| undefined` | S:9324 |
 
-**Ids** (from `@minecraft/vanilla-data` 1.26.52 `mojang-effect.d.ts`, a types-only reference that isn't imported at runtime): `"minecraft:poison"`, `"minecraft:wither"`, `"minecraft:hunger"`, `"minecraft:darkness"`, `"minecraft:fatal_poison"`.
+**Ids** (from `@minecraft/vanilla-data` 1.26.52 `mojang-effect.d.ts`, a types-only reference that isn't imported at runtime): `"minecraft:poison"`, `"minecraft:wither"`, `"minecraft:hunger"`, `"minecraft:darkness"`, `"minecraft:fatal_poison"`, `"minecraft:slowness"`, `"minecraft:fire_resistance"`. These seven are the only ids the colony reads (`slowness`: S2b `slowed_and_hp_below`; `fire_resistance`: S1 fire reflex). Any other id passed to `hasEffect` / `getEffect` is a bug.
 
 **Gotchas**
 - `getEffect` **throws** on an unknown id; it doesn't return undefined. Prefer `getEffects()` and filter by `typeId`.
@@ -194,6 +197,28 @@ These exist as attribute components that extend `EntityAttributeComponent`, so t
 ### A12. Equipment of other entities
 `getComponent('minecraft:equippable')` returns `EntityEquippableComponent` S:11289. Its `getEquipment(slot)` S:11321 works on any entity that has the component. Not needed in Phase 3.
 
+### A13. Air supply (drowning), D20
+- `entity.getComponent('minecraft:breathable'): EntityBreathableComponent | undefined` (component map S:3206 and S:3241, id enum S:795). Class `EntityBreathableComponent` S:10877; `static readonly componentId = 'minecraft:breathable'` S:10956. Privilege: none on reads; throws.
+
+| Member | Signature | Line | Notes |
+|---|---|---|---|
+| air supply | `airSupply: number` (read/write) | S:10890 | **@beta**, RERO on write. Throws "if the air supply is out of bounds [suffocationTime, maxAirSupply]". Unit not stated (ticks expected). Read only; never write it (free air is a cheat). |
+| total supply | `readonly totalSupply: number` | S:10955 | "Time in **seconds** the entity can hold its breath". Throws. |
+| can breathe | `readonly canBreathe: boolean` | S:10926 | **@beta**. Throws. |
+| breathes air / water | `readonly breathesAir: boolean` S:10897; `readonly breathesWater: boolean` S:10918 | | Throws. |
+| inhale / suffocate | `readonly inhaleTime: number` S:10941; `readonly suffocateTime: number` S:10948 | | Seconds. Not needed. |
+
+- **Unit risk:** `totalSupply` is in seconds while `airSupply` has no stated unit. Probe P18 measures both. Until P18 has run, the adapter reports `airSupplyTicks` only if `airSupply` is a finite number and `totalSupply` is a finite number > 0; otherwise unknown.
+- **Rule:** wrap every read in `try/catch`. Undefined component or a throw means "air unknown", which the sensor treats as full (no drowning reflex from this source).
+- **Fallback if the component throws or is absent:** the controller assumes `airTicks = 300` at the tick the bot becomes submerged (`isInWater` plus head block is water) and counts it down 1 per tick, resetting to 300 when the head leaves water. Used by S1 §5 and §9.
+- **Probe?** **Yes: P18.**
+
+### A14. Dropped item entities (D8)
+- A dropped item is an entity with `typeId === 'minecraft:item'`. Find them with `Dimension.getEntities({ type: 'minecraft:item', location, maxDistance })` (A1).
+- `entity.getComponent('minecraft:item'): EntityItemComponent | undefined` (component map S:3270, id enum S:991). Class `EntityItemComponent` S:12195, `static readonly componentId = 'minecraft:item'` S:12204.
+- `readonly itemStack: ItemStack` S:12203. "Item stack represented by this entity in the world." Throws; no `@privilege` tag, no `@beta` tag (stable). The d.ts does not say whether it is a copy or a live view: treat it as read-only and `clone()` before keeping or modifying it.
+- Used by the drop scan (S4a `scanDroppedItems`) and probe P4. Check `entity.isValid` first (A1 gotcha); an item entity despawns or is picked up between ticks.
+
 ---
 
 ## B. Events
@@ -203,7 +228,7 @@ Subscribing to these is always fine from a `worldLoad`, `startup` or normal scri
 | Event | Signal | Event fields | Subscribe options |
 |---|---|---|---|
 | **entityHurt (after)** | `world.afterEvents.entityHurt` S:24744; `subscribe(callback, options?: EntityHurtAfterEventOptions)` S:11866 | `EntityHurtAfterEvent` S:11828: `damage: number` S:11835, `damageSource: EntityDamageSource` S:11842, `hurtEntity: Entity` S:11848 | S:27001: `allowedDamageCauses?: EntityDamageCause[]`, `entities?: Entity[]`, `entityFilter?: EntityFilter`, `entityTypes?: string[]` |
-| `EntityDamageSource` S:26752 | | `cause: EntityDamageCause` S:26758, `damagingEntity?: Entity` S:26764, `damagingProjectile?: Entity` S:26770 | |
+| `EntityDamageSource` S:26752 | | `cause: EntityDamageCause` S:26758, `damagingEntity?: Entity` S:26764, `damagingProjectile?: Entity` S:26770 | For projectile damage `damagingEntity` may be the shooter and the projectile is in `damagingProjectile`. Unverified (probe P17). |
 | `EntityDamageCause` S:1250 | | `anvil, blockExplosion, campfire, charging, contact, drowning, entityAttack, entityExplosion, fall, fallingBlock, fire, fireTick, fireworks, flyIntoWall, freezing, lava, lightning, maceSmash, magic, magma, none, override, piston, projectile, ramAttack, selfDestruct, sonicBoom, soulCampfire, stalactite, stalagmite, starve, suffocation, temperature, thorns, 'void', wither` | |
 | entityHurt (before) | `world.beforeEvents.entityHurt` S:25268 | `EntityHurtBeforeEvent` S:11885: `cancel`, `damage` (writable), `damageSource`, `hurtEntity` | **Don't use.** Cancelling or altering damage is a cheat, and the callback is restricted. |
 | **entityHitEntity** | `world.afterEvents.entityHitEntity` S:24736 | `EntityHitEntityAfterEvent` S:11766: `damagingEntity: Entity` S:11773, `hitEntity: Entity` S:11779 | Fires on a melee hit attempt. Pairs with entityHurt to measure shield blocks (see probes). |
@@ -255,7 +280,7 @@ Every method below is **NRE** and "can throw". Call them only from `system.run*`
 
 | Action | Signature | Line | Semantics / gotchas | Probe? |
 |---|---|---|---|---|
-| Attack a given entity | `attackEntity(entity: minecraftserver.Entity): boolean` | G:564 | "Returns true if the attack was performed - for example, the player was not on cooldown and had a valid target. **The attack can be performed at any distance and does not require line of sight**." So the adapter **must enforce reach (≤ 3 blocks, eye to AABB) and LOS itself**; the API won't. | **Yes:** cooldown (how often true), damage vs `entityHurt.damage`, whether crits apply while falling |
+| Attack a given entity | `attackEntity(entity: minecraftserver.Entity): boolean` | G:564 | "Returns true if the attack was performed - for example, the player was not on cooldown and had a valid target. **The attack can be performed at any distance and does not require line of sight**." So the adapter **must enforce reach (≤ `config.body.meleeReach`, default 3.0 blocks, eye to AABB) and LOS itself**; the API won't. | **Yes:** cooldown (how often true), damage vs `entityHurt.damage`, whether crits apply while falling |
 | Swing (raycast target) | `attack(): boolean` | G:551 | "Target selection is performed by raycasting from the player's head". This is the fair alternative: `lookAtEntity` then `attack()`. | Yes (compare with attackEntity) |
 | Look at entity | `lookAtEntity(entity: minecraftserver.Entity, duration?: LookDuration): void` | G:737 | Default "2". **Always pass the enum explicitly.** | No |
 | Look at location | `lookAtLocation(location: minecraftserver.Vector3, duration?: LookDuration): void` | G:749 | | No |
@@ -321,7 +346,7 @@ Every method below is **NRE** and "can throw". Call them only from `system.run*`
 | **setItem** | `setItem(slot: number, itemStack?: ItemStack): void` | S:7439 | **WRITE (creates)** | NRE. Writes a *script* stack into the slot; `undefined` clears it. Conservation: the caller must remove the same items elsewhere. |
 | **addItem** | `addItem(itemStack: ItemStack): ItemStack \| undefined` | S:7252 | **WRITE (creates)** | NRE. First available slot(s), stacks with matching items. Returns the leftover, or undefined if everything fit. |
 | clearAll | `clearAll(): void` | S:7262 | **WRITE (destroys)** | NRE. Only after a successful serialize (snapshot). |
-| **moveItem** | `moveItem(fromSlot: number, toSlot: number, toContainer: Container): void` | S:7418 | **MOVE (engine)** | NRE. Conserving. The d.ts doesn't say what happens if `toSlot` is occupied, so only target an empty `toSlot`, or use `swapItems`. |
+| **moveItem** | `moveItem(fromSlot: number, toSlot: number, toContainer: Container): void` | S:7418 | **MOVE (engine)** | NRE. Conserving. The d.ts doesn't say what happens if `toSlot` is occupied, so only target an empty `toSlot`, or use `swapItems`. Check `container.getItem(toSlot) === undefined` in the same synchronous block as the `moveItem` call; if not empty, use `swapItems`. |
 | **swapItems** | `swapItems(slot: number, otherSlot: number, otherContainer: Container): void` | S:7463 | **MOVE (engine)** | NRE. Conserving. Works within one container or across two. |
 | **transferItem** | `transferItem(fromSlot: number, toContainer: Container): ItemStack \| undefined` | S:7517 | **MOVE (engine)** | NRE. Into the first available slots of `toContainer`. Returns "the items that couldn't be transferred". Phase 2 already handles the leftover (`settleTransfer`). |
 
@@ -361,7 +386,11 @@ There's no swap or move on `ContainerSlot`.
   1. `prev = eq.getEquipment(S)`; `item = inv.getItem(i)`.
   2. `inv.setItem(i, prev)` (`undefined` if there was nothing).
   3. `ok = eq.setEquipment(S, item)`.
-  4. If it throws or `ok === false`: `inv.setItem(i, item)`, then `eq.setEquipment(S, prev)`.
+  4. If step 3 throws or returns `false`:
+     - (a) `inv.setItem(i, item)`;
+     - (b) `cur = eq.getEquipment(S)`; if `cur` is not the same type and amount as `prev`, call `eq.setEquipment(S, prev)`;
+     - (c) if (b) throws or returns `false`, log `[colony] equip rollback failed slot=<S>` and return failure with the slot left as found.
+     - Items are never duplicated: `item` is only in the inventory and `prev` only in the equipment slot.
   
   This order is chosen so a failure part-way never leaves two copies. Don't run two equips in the same tick for the same slot.
 - **Probe?** Light. Confirm `setEquipment(Offhand, shield)` shows the shield and that it then blocks (part of the shield probe).
@@ -428,9 +457,12 @@ There's no swap or move on `ContainerSlot`.
 | **armour trims** | **NO** | Only the loot function `SetArmorTrimFunction` S:22045, not on ItemStack |
 | **banner patterns, firework/star data, goat-horn instrument, lodestone compass target, crossbow loaded projectile, suspicious-stew effect, tipped-arrow potion, anvil repair cost, any other custom NBT** | **NO** | Not exposed |
 
+S4a calls the NO rows *excluded* (`excluded.ts`, `ExcludeReason`); armour trims and shield banner patterns are the *invisible* losses (S4a §2).
+
 **Rule for the snapshot code**
-- Mark every stack `lossy: true` if its type is in the NO list, or if it has any component or data the serializer doesn't understand.
-- **Escape / dismiss** must never serialize a lossy stack to disk. Keep the in-memory `ItemStack` (same session), or deposit it in a chest first.
+- The serializer understands exactly these component ids: `minecraft:durability`, `minecraft:enchantable`, `minecraft:dyeable`, `minecraft:potion`, `minecraft:book`, `minecraft:inventory` (bundle), plus `typeId`, `amount`, `nameTag`, lore, `keepOnDeath`, `lockMode`, canDestroy, canPlaceOn and dynamic properties.
+- `lossy = true` if the type id is in the NO list of the table above, or if the stack has any other item component outside that list, ignoring `minecraft:food` and `minecraft:cooldown` (both derived from the type). (S4a may refine this; this is the default.)
+- **Escape / dismiss** must never serialize a lossy stack to disk. It keeps lossy stacks as in-memory `ItemStack` objects only (same session) and never deposits them in a chest. If the session ends before the restore (Save & Quit), the stack is lost and S4 logs `[colony] lossy stack dropped <typeId>`.
 - On Save & Quit a lossy stack gets degraded. Log it with `[colony]` and tell the owner in chat on the next load.
 
 ---
@@ -473,13 +505,18 @@ There's no swap or move on `ContainerSlot`.
 - `World.clearDynamicProperties(): void` S:24153. **Never call it**; it would wipe every key.
 - **Value types:** boolean, number, string, Vector3. Objects go through `JSON.stringify`.
 - **Size limit:** **not documented in the d.ts.** The d.ts example only warns "be very careful to ensure your serialized JSON str cannot exceed limits" (S:24305).
-  - Design: one key per bot (`colony:snap:<botName>`), chunked into ≤ 30,000-character parts (`…:0`, `…:1`, plus a `…:n` count key).
-  - Write the new chunks, **then** the count, **then** delete stale chunks, so a crash part-way never corrupts the last good snapshot.
-  - The commonly cited community limit is 32,767 chars per string. That's unverified here; the probe below confirms it.
+  - **Design (S4a §4.2 is authoritative; `lower = botName.toLowerCase()`):**
+    - chunks: `colony:snap:<lower>:<seq>:<i>`, each <= `chunkChars` (default 30,000);
+    - pointer: `colony:snap:<lower>:p`, written **last** (the commit point);
+    - restored seq: `colony:snap:<lower>:r`;
+    - colony meta: `colony:meta`.
+  - **Write order:** (1) write all chunks of the new `seq` (new key names, so the last good snapshot is never overwritten); (2) read them back and compare lengths; (3) write `:p`; (4) delete the chunks of the old `seq`. A reader trusts only the chunks the pointer names, so a crash part-way never corrupts the last good snapshot.
+  - **Unit:** chunk size is in UTF-16 characters of a JSON string that contains only ASCII (the serializer escapes every char > 0x7E as `\uXXXX`), so characters equal bytes.
+  - The commonly cited community limit is 32,767 chars per string. That's unverified here; probe P12 confirms it.
 - **Entity dynamic properties:** `Entity.setDynamicProperty` S:10476, `getDynamicProperty` S:10060, `getDynamicPropertyIds` S:10072, `getDynamicPropertyTotalByteCount` S:10086 (all throw InvalidEntityError).
   - On SimulatedPlayers they die with the entity: a disconnected or re-spawned bot is a new entity, and bots don't survive reload.
   - **Don't use them for snapshots.** They're fine for per-session tags.
-- **Probe?** Yes, light: write and read back a 31,000-char and a 40,000-char string, and record whether either throws.
+- **Probe?** Yes, light: P12 (sizes 1,000 to 40,000 ASCII chars; S6 §1.5 P2-b extends the list and owns the verdict).
 
 ---
 
@@ -499,7 +536,7 @@ There's no swap or move on `ContainerSlot`.
 
 **Gotchas**
 - **Lava check:** `typeId === 'minecraft:lava'` / `'minecraft:flowing_lava'`, or `isLiquid` combined with a type check.
-- **Safe cell for the bot:** feet block `isAir` (or passable), head block `isAir`, and the block below solid and not liquid.
+- **Safe cell for the bot:** `getBlock(feet)?.isAir`, `getBlock(head)?.isAir`, and `getBlock(below)` defined with `!isAir && !isLiquid`. An `undefined` block (unloaded chunk) means not safe. Tall grass or flowers at the feet make the cell unsafe (conservative).
 - **Never:** `setType` S:4601, `setPermutation` S:4583.
 
 ---
@@ -525,7 +562,30 @@ There's no swap or move on `ContainerSlot`.
   - `Dimension.id: string` S:8104 is `"minecraft:overworld"` / `"minecraft:nether"` / `"minecraft:the_end"`. That's the format Phase 2 stores (`OVERWORLD` in `world.ts`), and it matches vanilla-data `mojang-dimension.d.ts`.
   - `world.getDimension(dimensionId: string): Dimension` S:24233 accepts e.g. "overworld" and throws on an invalid name.
 - **Messages:** `world.sendMessage(message)` S:24459; `Player.sendMessage(message)` S:18484.
-- **Forbidden for gameplay** (cheats): `Entity.teleport` S:10624 / `tryTeleport` S:10693, `applyDamage` S:9819, `applyImpulse` S:9849, `applyKnockback` S:9886, `kill` S:10296, `addEffect` S:9714, `runCommand` S:10445, `Entity.addItem` S:9734, `Dimension.spawnItem` S:8959, attribute `setCurrentValue` S:10854.
+- **Forbidden for gameplay:** see Safe usage rule 7, which is the single authoritative list (superset of the cheats `Entity.teleport` S:10624 / `tryTeleport` S:10693, `applyDamage` S:9819, `applyImpulse` S:9849, `applyKnockback` S:9886, `kill` S:10296, `addEffect` S:9714, `runCommand` S:10445, `Entity.addItem` S:9734, `Dimension.spawnItem` S:8959, attribute `setCurrentValue` S:10854). Fixture-only exceptions are in section I.
+
+---
+
+## I. Fixture-only APIs (probes and GameTests, never gameplay)
+
+Used only by `src/probes/` (inside `fixtures.ts`) and `test/` (inside `combat-helpers.ts`), in functions named `fixture*` / `testOnly*`. Verified in `index.d.ts` (privilege checked on each doc comment). All are NRE (no-restricted-execution) and throw, except `new ItemStack` (no privilege tag, throws) and the game-rule fields (RERO on write).
+
+| API | Signature | Line | Use |
+|---|---|---|---|
+| spawn a mob | `Dimension.spawnEntity<T = never>(identifier, location: Vector3, options?: SpawnEntityOptions): Entity` | S:8901 | spawn fixture mobs |
+| teleport | `Entity.teleport(location: Vector3, teleportOptions?: TeleportOptions): void` | S:10624 | hold a mob at a spot |
+| clear velocity | `Entity.clearVelocity(): void` | S:9921 | stop a held mob drifting |
+| kill / remove | `Entity.kill(): boolean` S:10296; `Entity.remove(): void` | S:10367 | cleanup |
+| trigger event | `Entity.triggerEvent(eventName: string): void` | S:10668 | creeper `minecraft:start_exploding_forced` (d.ts example) |
+| add effect | `Entity.addEffect(effectType, duration, options?): Effect \| undefined` | S:9714 | `fire_resistance` on skeletons |
+| container write | `Container.setItem(slot, itemStack?)` | S:7439 | give marked items to a probe bot |
+| new item | `new ItemStack(itemType, amount?)` | S:16142 | same |
+| equip | `EntityEquippableComponent.setEquipment(slot, itemStack?): boolean` | S:11347 | offhand and armour fixtures |
+| set attribute | `EntityAttributeComponent.setCurrentValue(value): boolean` | S:10854 | top-up HP, set hunger |
+| game rules | `world.gameRules: GameRules` S:24091 (class S:14584): `doMobSpawning: boolean` S:14645, `mobGriefing: boolean` S:14705, `keepInventory: boolean` S:14693 | | RERO on write. Probes set and always restore them in `finally`. |
+| time | `World.setTimeOfDay(timeOfDay: number \| TimeOfDay): void` | S:24601 | NRE. Throws outside 0..24000. P15 and light fixtures. |
+
+Probes and tests restore every game rule and the time of day they change.
 
 ---
 
@@ -533,27 +593,31 @@ There's no swap or move on `ContainerSlot`.
 
 | Wanted | Status | Fallback |
 |---|---|---|
-| Mob target query | **Available but beta:** `Entity.target` S:9634 | Use it when defined. Always also run the proxy from A5 (hurt or hit within N ticks, or a hostile closing in). |
+| Mob target query | **Available but beta:** `Entity.target` S:9634 | Use it when defined. Always also run the proxy from A5 (hurt or hit within `provokeMemoryTicks`, or a hostile closing in). |
 | Creeper ignition | **Probably** `hasComponent('minecraft:is_ignited')` S:12067 or `dataDrivenEntityTrigger` S:24671. Unverified. | `dist_below: 3` is hissing (MOBS.md) |
 | Per-player ender chest | **Available:** `getComponent('minecraft:ender_inventory').container` S:11256, "always present on players". Out of scope per ROADMAP; persistence for SimulatedPlayers is unknown. | Don't use it in Phase 3 |
 | Raise shield | **No API.** | `isSneaking = true` with an offhand shield, and/or `useItemInSlot` with a hotbar shield (probe) |
 | Eat (consuming the item) | No dedicated API. `useItemInSlot` is a general hold-use; `Player.eatItem` (beta) applies the food but doesn't consume the stack. | `useItemInSlot` (probe). `eatItem` + manual decrement only with player approval. |
-| Reach / LOS enforcement in attacks | `attackEntity` ignores both | The adapter enforces reach ≤ 3 (eye to AABB) and LOS (A8), or uses `lookAtEntity` + `attack()` |
-| Saving at shutdown | The callback is restricted and fires after players left | Save on change, on a timer, and before every disconnect (ROADMAP) |
+| Reach / LOS enforcement in attacks | `attackEntity` ignores both | The adapter enforces reach ≤ `config.body.meleeReach` (default 3.0 blocks, eye to AABB) and LOS (A8), or uses `lookAtEntity` + `attack()` |
+| Saving at shutdown | The callback is restricted and fires after players left | Save on change, every `config.snapshot.intervalTicks`, and before every disconnect (ROADMAP) |
 | Lossless item serialization | Not possible for shulker contents, maps, trims, banners, fireworks, horns, lodestone, crossbow charge, stew, tipped arrows, repair cost, custom NBT | In-session: keep `ItemStack` objects in memory. Across reload: serialize what's listed in D5, and flag lossy stacks. |
 | Inventory-change event for armour/offhand | `PlayerInventoryType` is only `Hotbar` or `Inventory` | Snapshot equipment on a timer and after every adapter equip |
 | Engine move between inventory and equipment | No `moveItem` to an equipment slot | The ordered script read/write in D3 |
-| Dynamic property size limit | Not documented | Chunk at ≤ 30,000 chars (probe) |
+| Dynamic property size limit | Not documented | Chunk at ≤ 30,000 chars (probe P12) |
+| Air supply | Component read: `minecraft:breathable` (A13, beta `airSupply`) | Controller counts submerged ticks (A13 fallback) |
+| Light at night | `getLightLevel` semantics unverified (A9) | `isDaylight` from `getTimeOfDay()`; probe P15 |
 
 ---
 
 ## Needs in-game probe
 
+Thresholds and verdicts are defined only in S6 §1.5; the procedures there (a husk, not a zombie or skeleton, for P1; the hunger method of P0-e for P2) override the wording in this table.
+
 | # | Probe | What to do / measure | Decides |
 |---|---|---|---|
 | P1 | **Shield block** | Bot with an iron sword in the hotbar and a shield in `Offhand`. Three modes in turn: (a) `isSneaking = true`; (b) shield in hotbar slot + `useItemInSlot(slot)`; (c) neither. A zombie (or skeleton) attacks from the front for 10 s per mode. Log per hit: `entityHitEntity` count vs `entityHurt` count and damage on the bot, and `entityStartSneaking` firing. | Which mode blocks; raise delay |
 | P2 | **Eating via useItemInSlot** | Starve the bot to hunger ≤ 14, put `minecraft:cooked_beef` ×2 in slot 0, call `useItemInSlot(0)`. Each tick log `player.hunger.currentValue`, `player.saturation.currentValue`, slot 0 amount, and `itemStartUse`/`itemCompleteUse`/`itemStopUse` (with `useDuration`). Then repeat, calling `stopUsingItem()` at tick 10. | Ticks to eat, whether the item is consumed, whether it auto-stops, whether interrupting is safe |
-| P3 | **attackEntity reach/cooldown** | Bot and a stationary target (zombie in a 1×1 hole). Call `attackEntity` every tick at distances of 2, 3, 4, 6 and 10 blocks, and through a wall. Log the return value, `entityHurt.damage`, and target HP per tick. Repeat with `jump()` then attack while `getVelocity().y < 0` (crit). Also compare `lookAtEntity` + `attack()`. | `MIN_ATTACK_INTERVAL_TICKS`, crit multiplier, whether the adapter reach cap is mandatory (it is anyway) |
+| P3 | **attackEntity reach/cooldown** | Bot and a stationary target (zombie in a 1×1 hole). Call `attackEntity` every tick at distances of 2, 3, 4, 6 and 10 blocks, and through a wall. Log the return value, `entityHurt.damage`, and target HP per tick. Repeat with `jump()` then attack while `getVelocity().y < 0` (crit). Also compare `lookAtEntity` + `attack()`. | `config.body.attackIntervalTicks`, crit multiplier, whether the adapter reach cap is mandatory (it is anyway) |
 | P4 | **Items on disconnect** | Mark items with `nameTag 'probe-<tick>'`. Disconnect the bot. Count `minecraft:item` entities within 3 blocks at +1 and +20 ticks, and log `entityItemDrop`. | Whether clear-before-disconnect is required (keep it regardless) |
 | P5 | **playerInventoryItemChange for bots** | Subscribe without a filter. Have the bot pick up an item, eat, break a block, and have the script `setItem`/`transferItem`. Log `player.name`, `slot`, `inventoryType`, before/after. | Whether the snapshot can be event-driven or must be timer-only |
 | P6 | **isSneaking writable on SimulatedPlayer** | Set `true`, check the next tick: read it back, check `entityStartSneaking`, and measure speed over 40 ticks of `moveRelative(0, 1)`. | Sneak-away (warden) and shield mode A |
@@ -562,9 +626,13 @@ There's no swap or move on `ContainerSlot`.
 | P9 | **Name reuse and in-memory ItemStack** | Disconnect `Bot-1`. Spawn `Bot-1` again at +1, +5 and +20 ticks. `setItem` stacks held from the old bot (an enchanted, named, damaged sword). Check uniqueness, the new id, and that data survived. | Escape/summon flow |
 | P10 | **Movement primitives** | `moveRelative(1, 0)` with `lookAtEntity(mob, Continuous)`: does the strafe persist, and does the look keep tracking? `dropSelectedItem()`: whole stack or one? | Strafe/back-off tactics, haul drop |
 | P11 | **Hunger/saturation on bots, effect duration** | Read `player.hunger` / `player.saturation` on a fresh bot. Get poisoned by a cave spider and log `getEffects()` `.duration` at t and t+20 ticks. | Food logic, poison timer |
-| P12 | **Dynamic property size** | `world.setDynamicProperty` with 31,000- and 40,000-char strings, then read back. | Chunk size |
+| P12 | **Dynamic property size** | Write and read back ASCII strings of 1,000, 5,000, 10,000, 20,000, 30,000, 31,000 and 40,000 chars with `world.setDynamicProperty`; record the largest size that round-trips. | Chunk size: `chunkChars = floor(0.9 * largest / 1000) * 1000` when the largest is under 30,000, else keep 30,000 (as S6 `judgePropSize`) |
 | P13 | **Lifecycle events for bots** | Log `playerSpawn` (`initialSpawn`), `playerJoin`, `playerLeave` (before and after) for spawn, death+respawn and disconnect. In the before-event, try a `world.setDynamicProperty` and read it back after reload. | Bonus save path; rejoin detection |
 | P14 | **Shield disabled by axe** | A vindicator (or a player with an axe) hits the blocking bot. Log `bot.getItemCooldown('shield')` each tick. The category name is a guess, so also try reading `getComponent('minecraft:cooldown')` from the shield `ItemStack`. | `bot_shield_disabled` atom |
+| P15 | **Light semantics** (D18) | At open sky, log `Dimension.getLightLevel(pos)` and `getSkyLightLevel(pos)` at time-of-day 6000, 13000 and 18000 (set with `World.setTimeOfDay`); repeat in a sealed room with one torch at distance 2 and at distance 10, at night. Then stand a bot within 4 blocks of a spider at each setting and log whether `spider.target` is the bot (a spider only attacks unprovoked in low light). | Whether `getLightLevel` drops at night; the real spider neutrality threshold (`config.combat.spiderNeutralLight`); the `isDaylight` rule |
+| P16 | **Sprint knockback** | Bot at 4 blocks from a husk on flat ground. (a) Attack standing still; (b) set `isSprinting = true`, `moveRelative(0, 1)` for 5 ticks, then `attackEntity`. Log the husk position at 0 and 10 ticks after the hit. | Whether S3 `knockback_then_retreat` gains distance; if (b) minus (a) < 1 block, S3 treats it as plain `rush_kill` (no failure) |
+| P17 | **Projectile attacker** | A skeleton shoots a bot. Log `damageSource.cause`, `damageSource.damagingEntity?.typeId` and `damageSource.damagingProjectile?.typeId` in `entityHurt` (S:26770). | Whether S1 can attribute arrow hits to the skeleton |
+| P18 | **Air supply unit and rate** | Bot underwater (no cheats on the bot): log `breathable.airSupply` and `breathable.totalSupply` every 20 ticks until `airSupply` stops decreasing or damage starts. Then surface and log recovery. | Unit of `airSupply` vs `totalSupply` (seconds), decrement per tick, and the A13 fallback (`airTicks = 300`) |
 
 ---
 
@@ -581,21 +649,75 @@ There's no swap or move on `ContainerSlot`.
    - Inside any `beforeEvents.*` callback (`chatSend`, `playerLeave`, `entityHurt`, shutdown, startup): no NRE calls (all SimulatedPlayer methods, every `Container` write, `setEquipment`, `addEffect`…), and no writes to RERO props (`isSneaking`, `isSprinting`, `selectedSlotIndex`, `amount`, `nameTag`, `durability.damage`).
    - Copy what you need, then `system.run(() => …)`.
    - `startup` is also **early execution**: no world or dimension access, only EEA calls.
-5. **Beta members are isolated:** `Entity.target`, `Player.eatItem`, `EntityIsTamedComponent.tamedToPlayer(Id)`, `Block.isSolid`, `Dimension.getWeather`, `EquipmentSlot.Body`, `beforeEvents.chatSend`, and the whole gametest module.
+5. **Beta members are isolated:** `Entity.target`, `Player.eatItem`, `EntityIsTamedComponent.tamedToPlayer(Id)`, `Block.isSolid`, `Dimension.getWeather`, `EntityBreathableComponent.airSupply` / `canBreathe`, `EquipmentSlot.Body`, `beforeEvents.chatSend`, and the whole gametest module.
    - One adapter function per beta member, each with a `try/catch` and a safe default:
      - `target` → `undefined`
      - `getWeather` → `Clear`
      - `isSolid` → fall back to `!isAir && !isLiquid`
+     - `airSupply` / `canBreathe` → unknown (A13; use the controller's submerged-tick count)
+     - `Player.eatItem` → not called (S3 never uses it)
+     - `tamedToPlayer(Id)` → `undefined` (treat as tamed with an unknown owner)
+     - `EquipmentSlot.Body` → never used
+     - `beforeEvents.chatSend` → command parsing disabled, with a `[colony]` log
+     - gametest module → adapter-only import (existing boundary test)
 6. **Item conservation**
    - Use engine moves (`swapItems`, `transferItem`, `moveItem` into an empty slot) wherever possible.
    - Script writes (`setItem`, `addItem`, `setEquipment`, `new ItemStack`) are only allowed in:
      - (a) Phase 2 crafting
      - (b) the ordered equip swap (D3)
      - (c) snapshot restore, exactly once per snapshot id
-   - Mark the snapshot consumed **before** restoring. Restore after the bot is valid and on the ground.
-7. **Never use for gameplay:** `SimulatedPlayer.giveItem`/`setItem`/`useItem`/`useItemOnBlock`, `Entity.addItem`/`teleport`/`applyDamage`/`applyImpulse`/`applyKnockback`/`kill`/`addEffect`/`runCommand`, `Dimension.spawnItem`, attribute `setCurrentValue`/`resetTo*`, `setType`/`setPermutation`.
+   - Mark the snapshot consumed **before** restoring. Restore only when `bot.isValid` and `bot.isOnGround === true` (S:9523) on two consecutive pumps (>= 4 ticks apart).
+7. **Never use for gameplay (the single authoritative list):** `SimulatedPlayer.giveItem`/`setItem`/`useItem`/`useItemOnBlock`/`resetTo*`, `SimulatedPlayer.interactWithEntity` (tameables), `Entity.addItem`/`teleport`/`tryTeleport`/`applyDamage`/`applyImpulse`/`applyKnockback`/`kill`/`remove`/`triggerEvent`/`clearVelocity`/`addEffect`/`runCommand`, `EntityTameableComponent.tame`, `Player.eatItem` (unless `allowManualEat` is approved, C7), `Dimension.spawnItem`/`spawnEntity`, attribute `setCurrentValue`/`resetTo*`, `Block.setType`/`setPermutation`, `Dimension.setBlockType`, `move()`, `setBodyRotation`, `World.setTimeOfDay`, game-rule writes, `clearDynamicProperties`. **Exception:** the APIs in section I, only inside `fixtures.ts` / `combat-helpers.ts`.
 8. **Never snapshot `EquipmentSlot.Mainhand`.** It's the selected hotbar slot.
 9. **Always pass `LookDuration` explicitly.** Never use `move()` or `setBodyRotation()` (GameTest-relative) for top-level bots.
 10. **Before attacking:** `stopBreakingBlock()` if the bot is breaking, then select the weapon slot (`selectedSlotIndex`), then check reach and LOS in the adapter, then `attackEntity`.
 11. **Unknown ids:** `getEffect`, `ItemStack` constructor, `EnchantmentType` constructor and `getComponent` can throw on unknown ids. Validate with `EffectTypes.get` / `ItemTypes.get` S:16758 / `EnchantmentTypes.get` first, or catch.
-12. **Dynamic properties:** namespaced keys (`colony:…`), chunked, written new-then-swap. Never `clearDynamicProperties()`.
+12. **Dynamic properties:** namespaced keys (`colony:…`), chunked, written new-chunks-then-pointer (F).  Never `clearDynamicProperties()`.
+
+---
+
+## Revision log (review pass 1)
+
+Every added line number was checked against `node_modules/@minecraft/server/index.d.ts` with `grep -n` / direct line reads (all matched).
+
+DECISIONS rows:
+- D8 (`EntityItemComponent.itemStack`): applied. New A14: class S:12195, `itemStack` S:12203 (stable, throws, no privilege), component id S:12204, map S:3270, enum S:991.
+- D18 (probe P15 light semantics): applied. A9 row renamed "Total light (block and sky)", semantics paragraph, `isDaylight` from `getTimeOfDay()`, probe P15 added.
+- D20 (`minecraft:breathable`): applied. New A13 (class S:10877, `airSupply` S:10890 beta, `totalSupply` S:10955, `canBreathe` S:10926 beta), fallback and probe P18. Sharpness and honey_bottle are not API-MAP items.
+
+Findings:
+- API-MAP--completeness#1: applied (A13; line numbers verified).
+- API-MAP--completeness#2: applied (A4 `Entity.dimension` S:9470).
+- API-MAP--completeness#3: applied (new section I; merged with consistency#1: 12 rows incl. `doMobSpawning` S:14645, `mobGriefing` S:14705, `setTimeOfDay` S:24601, `spawnEntity` S:8901, `kill`/`remove`).
+- API-MAP--completeness#4: changed (air-supply probe added as P18, not "P14": P14 is the shield-disabled probe).
+- API-MAP--completeness#5: applied (Impossible table row "Air supply").
+- API-MAP--consistency#1: applied (section I plus the rule 7 exception; `Entity.teleport`, `clearVelocity`, `remove`, `triggerEvent`, `kill`, `addEffect`, `Container.setItem`, `new ItemStack`, `setEquipment`, `setCurrentValue`).
+- API-MAP--consistency#2: applied (F uses S4a §4.2 keys `:p`, `<seq>:<i>`, `:r`, `colony:meta`; pointer written last). Conflicts with precision#1's `:ptr`/`gen` names: S4a is authoritative, so precision#1's write order is kept but its key names are not.
+- API-MAP--consistency#3: applied (A5 uses `config.combat.approachRadius`).
+- API-MAP--consistency#4: applied (rule 7 is the superset incl. `tame`, `interactWithEntity`, `eatItem`, `move()`, `setBodyRotation`, `spawnEntity`, `setType`/`setBlockType`/`setPermutation`, `clearDynamicProperties`; H points to it).
+- API-MAP--consistency#5: applied (one line under the D5 table: NO rows = *excluded*, trims and banner patterns = *invisible*).
+- API-MAP--game-api#1: applied (A13; same content as completeness#1; the "used by S1 §5 and §9" note kept).
+- API-MAP--game-api#2: applied (A9 row renamed, semantics paragraph).
+- API-MAP--game-api#3: applied (P15 row, with `World.setTimeOfDay` for the time changes).
+- API-MAP--game-api#4: applied (P16 row; uses a husk per S6 rule 6 instead of a zombie).
+- API-MAP--game-api#5: applied (note in the `EntityDamageSource` row, P17; `damagingProjectile` S:26770 verified by grep).
+- API-MAP--logic#1: applied (A5 (c) uses the mob's own displacement and radius 6; S1 §5.3 still uses `prev.dist - distance` and must follow: cross-doc hand-off).
+- API-MAP--logic#2: applied (`getEntitiesFromRay` row: filter the origin entity).
+- API-MAP--precision#1: changed (see consistency#2: pointer-last order and ASCII/size rules applied with S4a's key names).
+- API-MAP--precision#2: applied (A5 proxy rewritten with config keys; "N ticks" in the Impossible row replaced by `provokeMemoryTicks`).
+- API-MAP--precision#3: applied (D5: exact list of understood components and the `lossy` rule).
+- API-MAP--precision#4: applied (D5: in-memory only, no chest deposit, `[colony] lossy stack dropped <typeId>`).
+- API-MAP--precision#5: changed (F: ASCII unit sentence added; P12 now tests 1,000 to 40,000 chars. The chunk formula follows S6 `judgePropSize`: `floor(0.9 * largest / 1000) * 1000` below 30,000, else 30,000; S6 §1.5 owns the verdict).
+- API-MAP--precision#6: applied (D3 step 4 with (a), (b), (c) rollback).
+- API-MAP--precision#7: applied (rule 6: `isValid` and `isOnGround === true` on two pumps >= 4 ticks apart).
+- API-MAP--precision#8: applied (A10: seven ids and the allow-list sentence).
+- API-MAP--precision#9: applied (H points to rule 7; `tryTeleport` added to rule 7).
+- API-MAP--precision#10: applied (G safe cell definition).
+- API-MAP--precision#11: applied (`config.snapshot.intervalTicks` in the Impossible row).
+- API-MAP--precision#12: applied (`config.body.meleeReach` in the C table row and the Impossible row).
+- API-MAP--precision#13: applied (P3: `config.body.attackIntervalTicks`).
+- API-MAP--precision#14: applied (sentence above the probe table; S6 §1.5 owns thresholds).
+- API-MAP--precision#15: applied (D1 `moveItem` row).
+- API-MAP--precision#16: applied (rule 5 defaults for `eatItem`, `tamedToPlayer(Id)`, `EquipmentSlot.Body`, `chatSend`, gametest, plus `airSupply`/`canBreathe`).
+
+Hand-offs: S6 documents "14 probes P1-P14"; it must add P15-P18 (P15 required by D18). S1 §5.3 `approaching` must use the mob's own displacement.

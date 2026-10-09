@@ -67,7 +67,7 @@ export interface BotSnapshot {
   stats: string;                      // OutcomeStats serialised by S2b; opaque here; "" when none; <= cfg.maxStatsChars
   lastPos: Vec3;                      // bot position at capture (feet)
   dimensionId: string;                // "minecraft:overworld" | "minecraft:nether" | "minecraft:the_end"
-  pausedTaskId?: string;              // TaskId of the task paused/carried at capture (S4b uses it on rejoin)
+  pausedTaskId?: string;              // TaskId of the task paused/carried at capture; informational (diagnostics, tests). The core re-emits `assign` on botRejoined (D26); nothing rebuilds a task from this
   carryover?: SnapStack[];            // stacks a previous restore could not place; re-offered by the next apply
 }
 
@@ -303,7 +303,7 @@ Budget example (`maxTotalChars 600000`, `keyOverheadChars 64`, payload 455 chars
 
 ### 4.5 Storage-full behaviour (what callers must do)
 
-`storage_full`, `too_large`, `engine_error`, `verify_failed`: the old snapshot is intact. S4a promises only that. Callers: a periodic/event checkpoint failure is logged at most once per 1200 ticks per bot and retried at the next interval; a **forced** write (dismiss, escape, idle, far) failing means the flow **must not clear the body or disconnect**. S4b maps failures to `SnapshotFailReason` (`error` unless S5 gains `storage_full`, Q5). Items are never trimmed to fit; only `stats` is dropped.
+`storage_full`, `too_large`, `engine_error`, `verify_failed`: the old snapshot is intact. S4a promises only that. Callers: a periodic/event checkpoint failure is logged at most once per 1200 ticks per bot and retried at the next interval; a **forced** write (dismiss, escape, idle, far) failing means the flow **must not clear the body or disconnect**. S4b maps `WriteFailReason` to `SnapshotFailReason`: `storage_full` -> `"storage_full"` (added to S5 by D7; text `the colony's save space is full`), every other reason -> `"error"`. Items are never trimmed to fit; only `stats` is dropped.
 
 ### 4.6 Sweep helper
 
@@ -353,13 +353,25 @@ export function applySnapshot(bot: SimBot, snap: BotSnapshot, token: RestoreToke
 4. `remaining` = `i0..i35` and equipment keys that are still non-empty (excluded stacks and anything picked up since).
 Order: inventory ascending, then head, chest, legs, feet, offhand. `selectedSlotIndex` is left alone.
 
+### 5.2a `rollbackClearHeld` (undo a failed clear or a failed disconnect; DECISIONS D21 H5)
+
+```ts
+/** Put back what clearSnapshotted emptied. For every key k that clearSnapshotted would clear for `snap`
+ *  (an `i<slot>` key for each snap.inventory entry, each present snap.equipment key) AND is in `held`:
+ *  if that slot is currently EMPTY, write held.get(k) with Container.setItem / setEquipment.
+ *  A non-empty slot is never touched. addItem is never used. Excluded stacks are not in `snap`, so they are never touched.
+ *  Returns the number of stacks put back. Never throws; each slot is in its own try/catch (a failure is logged and counted as not put back). */
+export function rollbackClearHeld(bot: SimBot, held: HeldStacks, snap: BotSnapshot): number;
+```
+Used by S4b only after `clearSnapshotted` returned `clear_failed` or after `disconnect()` threw (body still valid). It cannot duplicate: it only fills slots that `clearSnapshotted` emptied, with the live copies taken by the same `captureSnapshot` call (`held`). If `bot.isValid` is false it returns 0. Order: inventory ascending, then `EQUIP_KEYS` order. `selectedSlotIndex` is not touched (clear never changed it).
+
 ### 5.3 Exactly-once guards in `applySnapshot`
 
 Module state: `startedTokens: Set<string>` of `${botName.toLowerCase()}:${seq}`.
 Precondition (caller, S4b): `store.markRestored(name, snap.seq)` already returned without throwing, and the bot is valid and `isOnGround`.
 1. `bot.isValid` false -> `refused bot_invalid`. Token's lowercase name or `seq` differs from `snap` -> `refused token_mismatch`.
 2. No `opts.cursor`: `!bot.isOnGround` -> `refused not_ready` (token not started, caller retries next pump); key already in `startedTokens` -> `refused already_applied`. With `opts.cursor`: key must be in `startedTokens`, else `refused already_applied`.
-3. No cursor and `opts.scanDrops && snap.status === "online"`: run the drop scan (§6.3). `available:false` -> `refused scan_unavailable` (nothing started). Else `cursor.skip = <matched keys>`.
+3. No cursor and `opts.scanDrops && snap.status === "online"` (the status decides, never the restore cause; a `dismissed` or `escaping` snapshot was cleared before `disconnect()`, so it is never scanned): run the drop scan (§6.3). `available:false` -> `refused scan_unavailable` (nothing started). Else `cursor.skip = <matched keys>`. S4b passes `scanDrops = cfg.snapshot.dropsOnDisconnect` for every cause.
 4. Add the key to `startedTokens` (fresh start only). `inv`/`eq` not obtainable on a fresh start -> remove the key again, `refused engine_error`.
 
 ### 5.4 Per-slot cursor loop
@@ -391,7 +403,10 @@ The capture side mirrors this with `getEnchantments()`, `durability`, `getLore()
 
 ### 6.1 Dirty marking and writing
 
-`markDirty(botName, reason: "inventory" | "pickup" | "equip" | "chest" | "spawn" | "rejoin" | "timer", now)`. A bot is *writable* when `presence === "live"`, its body is valid, no flow (dismiss, escape, rejoin, apply) is running for it, and `cfg.enabled`. The writer runs inside the runtime pump (every 4 ticks) and, for each writable bot, writes an `online` checkpoint when `dirty && now - lastWriteTick >= dirtyDebounceTicks` or `now - lastWriteTick >= effectiveInterval`. Debounce coalesces bursts (a chest transfer fires many events). `lastWriteTick` starts at `now` on registration; timer phase offset = `parseInt(fnv1a32(lower), 16) % intervalTicks` so bots never write in the same pump.
+```ts
+export type DirtyReason = "inventory" | "pickup" | "equip" | "chest" | "spawn" | "rejoin" | "timer";   // src/core/snapshot/types.ts
+```
+`markDirty(botName: string, reason: DirtyReason, now: Tick)`. A bot is *writable* when `presence === "live"`, its body is valid, no flow (dismiss, escape, rejoin, apply) is running for it, and `cfg.enabled`. The writer runs inside the runtime pump (every 4 ticks) and, for each writable bot, writes an `online` checkpoint when `dirty && now - lastWriteTick >= dirtyDebounceTicks` or `now - lastWriteTick >= effectiveInterval`. Debounce coalesces bursts (a chest transfer fires many events). `lastWriteTick` starts at `now` on registration; timer phase offset = `parseInt(fnv1a32(lower), 16) % intervalTicks` so bots never write in the same pump.
 `effectiveInterval = cfg.inventoryEvent === "all" ? cfg.intervalTicks : min(cfg.intervalTicks, cfg.fallbackIntervalTicks)`.
 Skip the write when `contentHashOf(capture.snap)` equals the hash of the last successful write for this bot and `status` is unchanged (nothing to persist; still update `lastWriteTick`).
 
@@ -414,10 +429,15 @@ Skip the write when `contentHashOf(capture.snap)` equals the hash of the last su
 3. **Save & Quit has no clear step** (the bot is gone before any callback can run, API-MAP §F). Its bodies leave through the same player-removal path as `disconnect()`, which is assumed, not proven.
 4. `exactly once` holds regardless: the consumed seq is persisted before the first `setItem` (D5); `read` never returns it again; a crash mid-restore can lose the unwritten remainder but cannot place anything twice (Q4).
 5. **P4 says items vanish** (`snapshot.dropsOnDisconnect=false`): the checkpoint is the only copy. Restore it as is (`scanDrops: false`).
-6. **P4 says items drop (`true`, the default until P4 runs):** a checkpoint of status `online` restored after reload may duplicate stacks that were dropped on the ground at `lastPos`. Fallback = the drop scan below, run inside `applySnapshot` when S4b passes `scanDrops: true` (only for causes `reload` and `owner_returned`, and only for `status === "online"`).
+6. **P4 says items drop (`true`, the default until P4 runs):** a checkpoint of status `online` restored after the body left without a clear step may duplicate stacks that were dropped on the ground at `lastPos`. Fallback = the drop scan below, run inside `applySnapshot` when S4b passes `scanDrops: true`. The scan runs **for any restore cause** whenever `snap.status === "online"` (D21 H5); the status, not the cause, tells whether the body left without a clear step. It never runs for `dismissed` / `escaping` snapshots.
 
 ### 6.3 Drop scan (`scanDroppedItems`, adapter, used by §5.3 step 3)
 
+```ts
+export type DropScanResult = { available: true; skip: SlotKey[]; matched: number } | { available: false };
+/** `steps` = planApplySteps(snap, new Set(), new Set()); only steps whose key is a SlotKey are considered (carryover `c<n>` steps are never skipped). */
+export function scanDroppedItems(snap: BotSnapshot, steps: readonly ApplyStep[], radius: number): DropScanResult;
+```
 1. `dim = world.getDimension(snap.dimensionId)`. `!dim.isChunkLoaded(snap.lastPos)` -> `{ available: false }` (apply is refused with `scan_unavailable`; S4b must retry later or spawn the bot at `lastPos`, never restore blind).
 2. `ents = dim.getEntities({ type: "minecraft:item", location: snap.lastPos, maxDistance: cfg.reloadDropScanRadius })`; for each valid entity `e.getComponent("minecraft:item")?.itemStack` -> a multiset keyed `typeId|amount|nameTag-or-empty` (the component is not yet in API-MAP; the P4 probe uses the same read, Q7).
 3. Walk the plan steps (no `held`) in order; a step whose key `type|n|name` still has a count in the multiset is added to `skip` and the count is decremented. Skipped stacks stay on the ground (conserved); `ApplyResult.skippedAsDropped` lets S4b tell the owner.
@@ -432,7 +452,7 @@ Added to `config.snapshot` (`Phase3Config`) by the contract writer. Names marked
 | `enabled` (S6) | `true` | bool | Master switch. `false`: `write` returns `disabled`; S4b refuses dismiss/escape/idle/far |
 | `dropsOnDisconnect` (S6) | `true` | bool | P4 result. `true` enables the reload drop scan (§6.3). Clear-before-disconnect is mandatory either way |
 | `inventoryEvent` (S6) | `"all"` | `"all" \| "partial" \| "off"` | P5 result. `"all"`: event-driven dirty marking |
-| `intervalTicks` | 200 | ticks | Periodic checkpoint spacing per bot (10 s). S6 calls this `timerTicks` (Q6) |
+| `intervalTicks` | 200 | ticks | Periodic checkpoint spacing per bot (10 s). The single name everywhere (D6; S6's `timerTicks` is renamed) |
 | `fallbackIntervalTicks` | 100 | ticks | Used instead when `inventoryEvent !== "all"` (the P5 FAIL value) |
 | `dirtyDebounceTicks` | 20 | ticks | Minimum spacing between two event-driven writes of one bot |
 | `chunkChars` (S6) | 30000 | chars | Max length of one property string. Minimum accepted 1000 |
@@ -453,8 +473,19 @@ Constants (not config): `MAX_CHUNKS = 8`, key prefix `colony:snap:`, meta key `c
 | Q2 | Do `enchanted_book` stored enchantments appear in `enchantable`? | Excluded for now. A later probe may remove it from `EXCLUDED_EXACT`. |
 | Q3 | Real property size limit (P12 decides `chunkChars`). | 30,000 default; `maxTotalChars` 600,000; payloads are ASCII so chars = bytes. If `getDynamicPropertyTotalByteCount` counts more than chars, lower `maxTotalChars`. |
 | Q4 | Mid-restore crash loses the unwritten remainder; the drop-scan can wrongly skip a coincidental identical stack. | Accepted: both lose or leave items on the ground, never duplicate (ROADMAP: no duplication outranks no loss). A restore is one synchronous call in the normal case. |
-| Q5 | `SnapshotFailReason` (S5) has no `storage_full`. | Map to `error`. Reconciler may add `storage_full` with text `the colony's save space is full`. |
-| Q6 | S6 names the interval `snapshot.timerTicks`; S4a uses `intervalTicks`. | Reconciler renames one; semantics are identical. |
+| Q5 | `SnapshotFailReason` (S5) had no `storage_full`. | RESOLVED (D7): S5 adds `"storage_full"` with message id and text `the colony's save space is full` in S5 §6; S4b maps `WriteFailReason "storage_full"` to it. |
+| Q6 | S6 named the interval `snapshot.timerTicks`; S4a uses `intervalTicks`. | RESOLVED (D6): `snapshot.intervalTicks` everywhere; S6 changes. |
 | Q7 | `EntityItemComponent.itemStack` (d.ts line 12203, map line 3270) is not in API-MAP. | Used only by the drop scan and the P4 probe. The architect adds it to API-MAP. If refused, the scan degrades to counting `minecraft:item` entities (skip `min(count, steps)` stacks of largest amount first). |
 | Q8 | `readMeta`/`writeMeta` are not in the brief's store list (S5 D10 needs persistence). | Added to `SnapshotStore`; S4b/runtime call them from the `persistMeta` effect and at world load. |
 | Q9 | `testReset` (S6 C3) must delete snapshot keys. | Implemented as `store.delete(name)` per roster bot plus `port.set(key, undefined)` for every `colony:snap:*` and `colony:meta` id; never `clearDynamicProperties()`. |
+
+## Revision log (review pass 1)
+
+No review files exist for S4a (`docs/phase3/reviews/S4a-snapshot-data--*.md` matches nothing); this pass applies `DECISIONS.md` rows only.
+
+- DECISIONS D6: applied. `snapshot.intervalTicks` is the only name; §7 row and Q6 now say so (S6 changes, not S4a).
+- DECISIONS D7: applied. `"storage_full"` is in S5's `SnapshotFailReason`; §4.5 states the mapping (`storage_full` -> `"storage_full"`, others -> `"error"`); Q5 marked resolved. `WriteFailReason` already contained `storage_full`.
+- DECISIONS D9: accepted as is. `readDetailed`, `readMeta`, `writeMeta`, `gcAll`, `clearSnapshotted`, `planApplySteps`, `scanDroppedItems` stay. Added the missing exact signature of `scanDroppedItems` (+ `DropScanResult`) in §6.3 and the named type `DirtyReason` in §6.1, because S4b uses both by name.
+- DECISIONS D21 H5: applied. New §5.2a defines `rollbackClearHeld(bot, held, snap): number` (fills only emptied slots, never `addItem`, never touches excluded stacks). §5.3 step 3 and §6.2 item 6 now run the drop scan for any restore cause when `snap.status === "online"` and `scanDrops` is set; never for `dismissed` / `escaping`.
+- DECISIONS D26 (consequence, no S4a row): `pausedTaskId` comment changed to "informational"; the core re-emits `assign` on `botRejoined`, so nothing in S4a/S4b rebuilds a task from the snapshot.
+- DECISIONS D8, D10: not S4a rows (D8: API-MAP row for `EntityItemComponent.itemStack`; D10: S4b flows). Q7 unchanged.

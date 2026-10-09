@@ -16,8 +16,8 @@ Terminology: "owner" of a **bot** (new, §1) is not the "owner" field of an `Off
 | D5 | `!recall` = stop + go home: the sender's bots drop their current task (counted in the reply) and walk to home (else to the sender). Tasks are **dropped, not requeued** (requeueing would make bots walk straight back out on arrival). Bots busy for another player are skipped. |
 | D6 | `!summon`: dismissed bot -> `summonBot` effect (snapshot restore at the sender's feet); live bot -> a goto to the sender. `!dismiss`: `dismissBot` effect (snapshot flow). No argument = `all` (the sender's bots). `all` never touches bots owned by or busy for someone else. |
 | D7 | Dismissed / rejoining bots stay in the roster (`absent` map), keep their name and owner, and **count against `maxBots`**. They are never allocatable. |
-| D8 | Combat info for `!status` is **pushed** into the core by `botStatus` events (<= every 20 ticks, only on change). The core never calls into the game. Info older than 100 ticks is hidden. |
-| D9 | All bot-voiced notices from S1/S3/S4 (equipment request, chest full, excluded items, ...) go through one event `botNotice` with a typed `BotNotice`; the core renders the text and routes it to the bot's owner. S3/S4 never format chat text. |
+| D8 | Combat info for `!status` is **pushed** into the core by `botStatus` events (<= every `statusPushTicks` = 20 ticks, on change, plus a heartbeat re-push every `statusHeartbeatTicks` = 80 ticks while nothing changed). The core never calls into the game. Info is shown while `now - at <= statusStaleTicks` (100); older than 100 ticks is hidden. |
+| D9 | All bot-voiced notices from S1/S3/S4 (equipment request, chest full, excluded items, ...) go through one event `botNotice` with a typed `BotNotice`; the core renders the text and routes it to the bot's owner. S3/S4 never format chat text (S3's equipment asks are `equipNeed { need, low }`, §6). |
 | D10 | Colony `chest`, `home` and bot owners are persisted by the game layer through one effect `persistMeta` (emitted at most once per `handle()` call, only when something changed) and restored by one event `rosterRestored`. |
 
 ## 1. Owner concept
@@ -74,6 +74,7 @@ Rules:
 ```ts
 export interface HomeRef { dimensionId: string; pos: Vec3 } // pos = integer block corner: Math.floor of the sender's x, y, z
 ```
+- **Walking target = block centre.** `HomeRef.pos` is an integer block corner; wherever S5, S4 or S1 turn it into a destination for a bot to walk to, use `{ x: pos.x + 0.5, y: pos.y, z: pos.z + 0.5 }` (a bot sent to the raw corner stands on the block edge and can fail the arrival tolerance in the next block). The stored `HomeRef` itself is never changed.
 - `ColonyState.home?: HomeRef`; `Colony.home(): HomeRef | undefined` (copy) and `ColonySnapshot.home?` expose it.
 - `!home set` is synchronous (no locate round trip): `home = { dimensionId: sender.dimensionId ?? "minecraft:overworld", pos: floor(sender.pos) }`; marks meta dirty. This needs the new optional field `Sender.dimensionId?: string`; `src/game/frontends/sender.ts` fills it with `player.dimension.id` (contract writer).
 - `!home` (show) is read-only. Neither home command touches offers or the queue.
@@ -131,6 +132,9 @@ New `ArgType`s: `defendArg` (integer `minRadius..maxRadius`, or literal `stop`, 
 - `recall`: `{ kind: "recall" }`.
 `Values` gains `radius?: number; stop?: boolean; target?: BotTarget; homeAction?: "show"|"set"`.
 
+`parseArg` fills `Values` exactly like this (one way only): `defendArg` -> `values.stop = true` for the token `stop`, else `values.radius = n`; the optional `bots` arg (`count`) -> `values.count` (existing key); `botOrAll` -> `values.target` (`{kind:"all"}` for `all`, else `{kind:"bot", name}`); `homeAction` -> `values.homeAction = "set"`.
+Integer rule: `defendArg` accepts a token as a radius only if it matches `/^[0-9]+$/` and `DEFEND_LIMITS.minRadius <= Number(token) <= DEFEND_LIMITS.maxRadius`; otherwise the radius error of §3.3 (so `+16`, `16.0`, `1e1` and non-ASCII digits are rejected). The literal is compared with `token.toLowerCase() === "stop"`; `all` and `set` likewise with `toLowerCase()`.
+
 ### 3.3 Parse errors (each followed by the usage line, as in Phase 1)
 
 | Case | Error text |
@@ -139,7 +143,7 @@ New `ArgType`s: `defendArg` (integer `minRadius..maxRadius`, or literal `stop`, 
 | `!defend stop 2` (anything after `stop`) | `'stop' takes no other arguments.` |
 | `!defend 16 0` / `!defend 16 17` / `!defend 16 x` | Phase 1 count error: `Count must be a whole number from 1 to 16.` |
 | `!defend 16 2 9` | `Too many arguments.` |
-| `!home foo` | `Unknown home action 'foo'. Use !home or !home set.` (echo via `echo()`, prefix from the `prefix` parameter) |
+| `!home foo` | `Unknown home action '{echo}'. Use {p}home or {p}home set.` (`{echo}` = `echo(token)`, `{p}` = the `prefix` parameter) |
 | `!summon @@x` / `!dismiss bad!name` | Phase 1: `'bad!name' isn't a valid bot name (1-16 letters, digits, _ or -).` |
 | `!summon a b`, `!recall now`, `!home set x` | `Too many arguments.` |
 
@@ -159,8 +163,8 @@ Notes: the `stop` token check for `!defend` happens in `parseArg` when `arg.type
 
 ### 4.2 `!defend [radius] [bots]`
 1. `n = count`. Validation order as Phase 2 step 2 (`noBots`/`allDismissed`, then `tooMany`/`tooManyAway`).
-2. Builds `n` specs `{ kind: "defend", center: { ...sender.pos }, radius }` (center keeps the sender's exact x/y/z at command time) and calls the shared `request(sender, now, specs)`: idle bots first, then own tasks (replaced silently), else a task offer that lists each busy bot's **activity** and issuer; `!override` / `!queue` work as for goto/gather (a queued defend is picked up later: `Picking up your queued task: defending x y z (r16).`).
-3. Ack per assigned bot (bot-voiced to sender): `defending`.
+2. Builds `n` specs `{ kind: "defend", center: { ...sender.pos }, radius }` (center keeps the sender's exact x/y/z at command time; the task keeps the floats) and calls the shared `request(sender, now, specs)`: idle bots first, then own tasks (replaced silently), else a task offer that lists each busy bot's **activity** and issuer; `!override` / `!queue` work as for goto/gather (a queued defend is picked up later: `Picking up your queued task: defending x y z (r16).`).
+3. Ack per assigned bot (bot-voiced to sender): `defending`. `{pos}` in every defend string (ack, `activity`, `noun`, reports) is the existing `fmtPos` from `messages.ts`, which prints each coordinate as an integer when whole and with one decimal otherwise. Example: sender at (100.5, 64, 200.25) -> `Defending 100.5 64 200.3 (radius 16).` (`Math.round(200.25*10)/10 = 200.3`). The examples in this file use whole coordinates.
 4. `DefendTask { id, kind: "defend", center, radius, issuer, createdAt }` never reports `done`. It ends only by: `!stop` (all or `<bot>`), `!defend stop`, an `!override` of a pending offer by another player (`cancel(..., "preempted")`, the defend task is **requeued** at the queue front with a `reassigned` notice, noun `defend x y z (r16)`), `!dismiss`, `!recall`, the issuer's own new task replacing it, or bot removal (requeued like any task, `botLeftRequeued`). A `failed` report prints `defendFailed`. A `done` report (should not happen) is treated as ended with the line `Stopped defending x y z.` (`defendEnded`).
 5. Allocation tweak (`allocator.ts`): the busy sort key becomes `rank(b) = (issuer is requester ? 0 : 2) + (b.task.kind === "defend" ? 1 : 0)`, then `createdAt`, then `seq`. So the order of busy bots taken is: requester's non-defend, requester's defend, others' non-defend, others' defend. Idle bots are still first.
 6. `!defend` when the sender already has defenders just adds more (a second zone). To move a zone: `!defend stop` then `!defend`.
@@ -187,27 +191,27 @@ See §2. Replies: `homeSet`, `homeShow`, `noHome`. `!home set` marks meta dirty.
 Justification (D3): dismiss is reversible (`!summon` restores the exact inventory, no cooldown) so ownership is not a gate, but taking a bot off another player's active task is the same harm as `!stop <their bot>`, so it uses the same confirmation. The owner is told when someone else dismisses their bot (`dismissedBy`).
 
 Completion events:
-- `botDismissed { botId, name, cause, stacks }`: remove the record from `s.bots`; create `AbsentBot { presence: "dismissed", since: now, owner, seq }`. If the record still had a task (game-initiated dismiss while busy, should not happen): requeue it like `onBotRemoved` (without the `left` broadcast). Replies by cause (colony voice): `command` -> to `leaveRequestedBy` `dismissed(bot, stacks)`, and if the owner is a different player also to the owner `dismissedBy`; `idle` -> to the owner (or `"all"` if unclaimed) `dismissedIdle`; `far` -> `dismissedFar`. Unknown `botId` but known absent name -> ignore (duplicate). Unknown everything -> still create the absent entry (owner undefined).
+- `botDismissed { botId, name, cause, stacks }`: remove the record from `s.bots`; create `AbsentBot { presence: "dismissed", since: now, owner, seq }`. If the record still had a task (game-initiated dismiss while busy, or a late completion after a timeout): requeue it at the queue front like `onBotRemoved` (without the `left` broadcast) and send `botLeftRequeued` to the task issuer. Replies by cause (colony voice): `command` -> to `leaveRequestedBy` `dismissed(bot, stacks)`, and if the owner is a different player also to the owner `dismissedBy`; `idle` -> to the owner (or `"all"` if unclaimed) `dismissedIdle`; `far` -> `dismissedFar`. Unknown `botId` but known absent name -> ignore (duplicate). Unknown everything -> still create the absent entry (owner undefined).
 - `botDismissFailed { botId, name, reason }`: record -> `presence = "live"`, clear `flowSince`/`leaveRequestedBy`; reply to the requester `dismissFailed(bot, reasonText)`. The cancelled task is not restored (the player re-issues it).
-- Timeout: `leaving` longer than `flowTimeoutTicks` -> treated as `botDismissFailed` with reason `error`.
+- Timeout: `leaving` longer than `flowTimeoutTicks` -> treated as `botDismissFailed` with reason `error`. (S4b's flow deadline is 500 ticks < 600, so this is a safety net.) **Late completion:** a `botDismissed` that arrives after that timeout finds a `live` record whose body is really gone; it is applied as a normal dismissal (record removed, `AbsentBot` created). If the record has a task, the task is requeued at the queue front (as `botRemoved` does) and `botLeftRequeued` is sent to the task issuer; the `dismissed` reply goes to the owner (or `"all"`) because `leaveRequestedBy` was cleared. A late `botDismissFailed` after the timeout is ignored and logged `[colony] late botDismissFailed <name>`.
 
 ### 4.5 `!summon [bot|all]`
 `all` (default): targets = roster entries (live, absent) with `isMine`, claiming unclaimed. None -> `summonNone`.
 - Absent `dismissed`: `presence = "rejoining"`, `since = now`, `requestedBy = sender.id`; effect `summonBot { name, near: { ...sender.pos }, dimensionId: sender.dimensionId ?? "minecraft:overworld", requestedBy: sender.id }`.
-- Live: task issued by someone else -> skip with `skippedBusy`; otherwise cancel own task (`"preempted"`, dropped) and quietly assign a goto to `sender.pos` (task issuer = sender).
+- Live: task issued by someone else -> skip with `skippedBusy`; otherwise cancel own task (`"stopped"`, dropped) and quietly assign a goto to `sender.pos` (task issuer = sender).
 - leaving / rejoining entries are skipped silently (they are already in flight).
 - Summary reply `summoningAll(n)` / `summoning(bot)` with `n` = number of bots actually acted on, after the skip lines. If every target was skipped, only the skip lines are sent.
 
 `<bot>`:
 - Unknown -> `unknownBot`. `leaving` / `rejoining` -> `botAway`.
 - Absent `dismissed` -> claim, effect as above, reply `summoning(bot)`. This is allowed for any player regardless of owner (D3: summon only brings a bot to *you*; the owner is not harmed).
-- Live, idle or own task -> claim, cancel own task (dropped), assign goto `sender.pos` via `assignNew` (ack `onMyWay`, Phase 1 string).
+- Live, idle or own task -> claim, cancel own task (`"stopped"`, dropped), assign goto `sender.pos` via `assignNew` (ack `onMyWay`, Phase 1 string).
 - Live, busy with another's task -> pinned offer `action: "summon"` (replies `offerBusyBot`, `summonOfferHint`).
 
 Completion events:
 - `botRejoined { botId, name, cause: "summon", ... }`: §4.7. Reply bot-voiced `rejoinedSummon(stacks)` to the summoner (`requestedBy`, else owner, else `"all"`).
 - `botRejoinFailed { name, cause: "summon", reason }`: absent entry -> `presence = "dismissed"`; reply to `requestedBy` `summonFailed(bot, reasonText)`.
-- Timeout: `rejoining` longer than `flowTimeoutTicks` -> treated as `botRejoinFailed { reason: "error" }`.
+- Timeout: `rejoining` longer than `flowTimeoutTicks` -> treated as `botRejoinFailed { reason: "error" }`. A `botRejoined` that arrives after that timeout means a body really exists: it is applied as a normal rejoin (the `dismissed` absent entry becomes a live record); a late `botRejoinFailed` is ignored and logged.
 
 ### 4.6 Pinned offers (`state.ts`)
 
@@ -234,7 +238,14 @@ export type Offer = TaskOffer | StopOffer | PinnedOffer;
 
 Events (payloads in §5): `botEscaped` (flow started), `botRejoined` (bot is back, new `botId`), `botRejoinFailed`.
 - `botEscaped { botId, name, dest }`: record -> `presence = "rejoining"`, `rejoinDest = dest`, `flowSince = now`; **task and progress are retained**; the record leaves the allocation pool. Reply bot-voiced (still-valid old id) to the owner (`"all"` if unclaimed): `escaping(destText)` where `destText` is `home` for `dest: "home"`, else the owner's name (`the owner` if unclaimed).
-- `botRejoined { botId, name, cause, pos, stacks, owner?, dest? }`: find the record by **name** in `s.bots` (presence != live) or the entry in `s.absent`; else (unknown name) create a fresh record (owner = `e.owner`). Build the new live record: `{ id: e.botId, name, seq (kept, else next), owner: kept ?? e.owner, presence: "live" }`; delete the old map key, insert the new one; if the old record held a task: `task' = withDelivered(task, progress)` (gather: `delivered = progress.delivered`; `held` items are back in the inventory by the restore), then `assign(newRec, task')` -> `assign` effect with the same task id (the new controller restarts it, after its own "recover first" phase, S1). If that task is already complete (`delivered >= amount`) drop it silently instead. Reply bot-voiced by cause (to the right audience): `escape` -> owner: `rejoinedEscape(destText)`; `summon` -> `requestedBy` ?? owner: `rejoinedSummon(stacks)`; `reload` -> owner: `rejoinedReload`; `owner_returned` -> owner: `rejoinedOwner(ownerName)`. Then `drainQueue()`.
+- `botRejoined { botId, name, cause, pos, stacks, owner?, dest?, seq?, leftover?, haulDropped? }` (the last three are S4b's optional additions, H3; `pos` and `leftover` are accepted and not used by the core):
+  1. **Duplicate guard.** If `s.bots` already has a record with `presence === "live"` and the same lowercase name, ignore the event and log `[colony] duplicate botRejoined <name>`.
+  2. Find the record by **name** in `s.bots` (presence != live) or the entry in `s.absent`; else (unknown name) create a fresh record (owner = `e.owner`).
+  3. Build the new live record: `{ id: e.botId, name, seq: (kept ?? e.seq ?? next), owner: kept ?? e.owner, presence: "live" }`; delete the old map key, insert the new one.
+  4. **Task.** If the old record held a task: `task' = withDelivered(task, progress)`; for `task.kind === "gather"`: `delivered' = progress.delivered + (haulDropped ? min(haulDropped.count, progress.held) : 0)` (H3: items the restore dropped on purpose count as delivered-equivalent; `held` items that are back in the inventory stay held). If `task.kind === "gather"` and `delivered' >= task.amount`: drop the task silently. **Every other task kind** (`goto`, `defend`) is re-assigned unchanged. Otherwise `assign(newRec, task')` -> `assign` effect with the same task id.
+  5. Reply bot-voiced by cause (to the right audience): `escape` -> owner: `rejoinedEscape(destText)`; `summon` -> `requestedBy` ?? owner: `rejoinedSummon(stacks)`; `reload` -> owner: `rejoinedReload`; `owner_returned` -> owner: `rejoinedOwner(ownerName)`. Then `drainQueue()`.
+  - Worked example (H3): gather 16 oak_log, `progress = {delivered: 3, held: 12}`, `haulDropped = {count: 12}` -> `delivered' = 3 + min(12, 12) = 15 < 16`: the task continues with 1 log to go. With `haulDropped.count = 14` and `held = 12`: `3 + min(14, 12) = 15`, the same.
+  - **Single task owner (D26).** The controller carry (`exportCarry`) holds only `brainState`, `recover`, `objectiveItemIds` and `stats`; it never holds the task. The core is the only side that re-installs it: the `assign` above is emitted on `botRejoined`, and the controller creates the executor from it, started in the paused/recover layer when `recover` is set (S1 H4). A controller that already has an executor with `taskId === task.id` replaces it silently, so a task is never running twice and cargo is never consumed twice.
 - `botRejoinFailed { name, cause, reason }`: record (escape) -> remove it, requeue its task (`requeueable`, front of queue, reply `botLeftRequeued` to the task issuer), create `AbsentBot dismissed`; absent entry -> back to `dismissed`. Reply `summonFailed` (cause `summon`, to `requestedBy`) or `rejoinFailed` (other causes, to the owner / `"all"`).
 - `botRemoved` for a record whose presence is not `live`: the flow ended without its event. Do **not** drop the roster entry: treat as `botDismissed { cause: "command" }` without replies, except reason text `"died"` which deletes the roster entry as today (`left`). The runtime must not emit `botRemoved` for service-driven disconnects (S4 contract); this is only a safety net.
 - `taskReport` / `taskProgress` / `botStatus` for a record whose presence is not `live` -> ignored.
@@ -244,15 +255,16 @@ Events (payloads in §5): `botEscaped` (flow started), `botRejoined` (bot is bac
 ### 4.8 `!recall`
 Targets: live records with `isMine`, claiming unclaimed ones. Absent/leaving/rejoining bots are ignored (use `!summon`).
 1. None -> `recallNone`.
-2. Destination `dest` = `home.pos` (copy) if home is set, else `sender.pos`. Word: `home` / `you`.
-3. Per target: task issued by someone else -> skipped (`skippedBusy`, lines first). Otherwise, if it has a task (necessarily the sender's): `cancel(rec, "stopped")`, `dropped++`; defend tasks are included. Then quietly assign `goto(dest)` (issuer = sender; Y of home as stored).
+2. Destination `dest` = `{ x: home.pos.x + 0.5, y: home.pos.y, z: home.pos.z + 0.5 }` if home is set, else `{ ...sender.pos }` (§2: walking target = block centre). Word: `home` / `you`.
+3. Per target: task issued by someone else -> skipped (`skippedBusy`, lines first). Otherwise, if it has a task (necessarily the sender's): `cancel(rec, "stopped")`, `dropped++`; defend tasks are included. Then quietly assign `goto(dest)` (issuer = sender; Y of home as stored). Example: home `pos (12, 64, 3)` -> `dest (12.5, 64, 3.5)`; the arrival line is `Arrived at 12.5 64 3.5.`
 4. Reply once: `recalling(n, word, dropped)` where `n` = bots recalled; if `n = 0` only skip lines + `recallNone`.
 5. Queued tasks are untouched. The arrival report is the Phase 1 `Arrived at x y z.` per bot.
 
 Why drop, not requeue: `drainQueue` gives queue heads to idle bots, so requeued tasks would restart the moment a recalled bot arrived. A player who wants the work back re-issues it; a player who wants a pause uses `!recall`.
 
 ### 4.9 Status read, reports, misc
-- `botStatus { botId, status }` (§5) -> `rec.combat = { status, at: now }` for live records.
+- `botStatus { botId, status }` (§5) -> `rec.combat = { status, at: now }` for live records (heartbeat re-pushes simply refresh `at`).
+- `botNotice` rate limit: `ColonyState.lastNotice: Map<string, Tick>` keyed `${lowercaseName}:${notice.id}`; a notice whose key was delivered less than `noticeMinIntervalTicks` (200 = 10 s) ago is dropped (not queued). `createState()` sets it to `new Map()`.
 - `cmdStatus` renders per §7. It now takes `now`.
 - Bot `owner` and `presence` appear in `ColonySnapshot` (§5).
 - Report texts: `reportText` gets the defend branch (§4.2 item 4). `taskActivity` / `taskNoun` get the defend case:
@@ -267,7 +279,7 @@ Why drop, not requeue: `drainQueue` gives queue heads to idle bots, so requeued 
 S4 owns the exact payloads of the snapshot events/effects; the fields below are what the core needs. S4 may **add** fields; it must not remove or rename these.
 
 ```ts
-import type { BotStatusView } from "./combat/types.js"; // S1
+import type { BotStatusView, LayerKind, OptionKind } from "./combat/types.js"; // BotStatusView: S1 §1 (D25: exactly the shape below); OptionKind: S2b
 
 // ---- primitives
 export interface Sender extends PlayerRef { pos: Vec3; /** e.g. "minecraft:overworld"; absent = overworld */ dimensionId?: string }
@@ -277,14 +289,17 @@ export type EscapeDest = "home" | "owner";
 export type DismissCause = "command" | "idle" | "far";
 export type RejoinCause = "summon" | "escape" | "reload" | "owner_returned";
 export type SnapshotFailReason =
-  | "busy" | "no_snapshot" | "snapshot_unreadable" | "spawn_failed" | "name_in_use" | "owner_offline" | "error";
+  | "busy" | "no_snapshot" | "snapshot_unreadable" | "spawn_failed" | "name_in_use" | "owner_offline" | "storage_full" | "error"; // storage_full: D7 / S4b H7
 
 /** Persisted by the game layer next to the bot snapshots (S4 store). Owners keyed by lowercase bot name. */
 export interface ColonyMeta { chest?: ChestRef; home?: HomeRef; owners: Record<string, PlayerRef> }
 
+/** What S3's equipment manager can ask for (declared once, here; S3 §5.2 imports it). */
+export type AskNeed = "weapon" | "shield" | "helmet" | "chestplate" | "leggings" | "boots" | "food";
+
 /** Bot-voiced chat lines raised by game-side code; the core renders and routes them (see §6). */
 export type BotNotice =
-  | { id: "equipNeed"; item: string }                      // shortId, e.g. "iron_sword"
+  | { id: "equipNeed"; need: AskNeed; low: boolean }       // D24. low = the item exists but is almost broken; rendering depends on need, low and whether a colony chest is set (§6)
   | { id: "chestFull" }
   | { id: "excludedDropped"; count: number; pos: Vec3 }
   | { id: "restoreLeftover"; count: number }
@@ -302,12 +317,13 @@ export type Task = GotoTask | GatherTask | DefendTask;       // TaskOf / TaskKin
 
 // ---- events (game -> core) additions to ColonyEvent
   | { kind: "botStatus"; now: Tick; botId: BotId; status: BotStatusView }
-  | { kind: "botDismissed"; now: Tick; botId: BotId; name: string; cause: DismissCause; stacks: number }
+  | { kind: "botDismissed"; now: Tick; botId: BotId; name: string; cause: DismissCause; stacks: number; seq?: number }
   | { kind: "botDismissFailed"; now: Tick; botId: BotId; name: string; reason: SnapshotFailReason }
-  | { kind: "botEscaped"; now: Tick; botId: BotId; name: string; dest: EscapeDest }
+  | { kind: "botEscaped"; now: Tick; botId: BotId; name: string; dest: EscapeDest; pos?: Vec3 }
   | { kind: "botRejoined"; now: Tick; botId: BotId; name: string; cause: RejoinCause; pos: Vec3;
-      stacks: number; owner?: PlayerRef; dest?: EscapeDest }
-  | { kind: "botRejoinFailed"; now: Tick; name: string; cause: RejoinCause; reason: SnapshotFailReason }
+      stacks: number; owner?: PlayerRef; dest?: EscapeDest;
+      /** S4b additions (H3): */ seq?: number; leftover?: number; haulDropped?: { itemIds: string[]; count: number } }
+  | { kind: "botRejoinFailed"; now: Tick; name: string; cause: RejoinCause; reason: SnapshotFailReason; botId?: BotId }
   | { kind: "rosterRestored"; now: Tick; meta: ColonyMeta; names: string[] }
   | { kind: "botNotice"; now: Tick; name: string; botId?: BotId; notice: BotNotice }
 
@@ -321,40 +337,40 @@ export type Task = GotoTask | GatherTask | DefendTask;       // TaskOf / TaskKin
 
 // ---- read model
 export interface BotView {
-  id: BotId;                    // live: the entity id; non-live: `dismissed:${lowercaseName}` (never an entity id)
+  id: BotId;                    // the entity id for `live`, `leaving` and `rejoining` records (rejoining: the OLD id, no longer valid); `dismissed:${lowercaseName}` only for `presence: "dismissed"`
   name: string;
   state: BotState;              // "busy" iff `task` set (a rejoining-after-escape bot keeps its task)
   task?: Task;
   progress?: TaskProgress;
   owner?: PlayerRef;
   presence: BotPresence;
-  /** Latest pushed status, raw (no staleness filter; `!status` applies statusStaleTicks). Live records only. */
+  /** Latest pushed status, raw (no staleness filter; `!status` shows it while now - at <= statusStaleTicks). Live records only. */
   combat?: BotStatusView;
 }
 export interface ColonySnapshot { bots: BotView[]; queued: Task[]; pendingOffers: number; chest?: ChestRef; home?: HomeRef }
 
-export interface ColonyConfig { /* existing */ statusStaleTicks: Tick; statusPushTicks: Tick; flowTimeoutTicks: Tick }
+export interface ColonyConfig { /* existing */ statusStaleTicks: Tick; statusPushTicks: Tick; statusHeartbeatTicks: Tick; flowTimeoutTicks: Tick; noticeMinIntervalTicks: Tick }
 ```
 - `snapshot().bots` lists the whole roster (live, leaving, rejoining, dismissed) by `seq`. Existing tests only contain live bots, so only the new `presence` field appears.
 - Accessors on `Colony` for the runtime (cheap, no event): `home(): HomeRef | undefined`, `ownerOf(botId: BotId): PlayerRef | undefined`.
 - Executor registry (B3): `"defend"` -> `DefendExecutor` (S1/B3). The core only needs the task kind.
 - `TaskSpec` (state.ts) gains `| { kind: "defend"; center: Vec3; radius: number }`; `newTask`, `copyTask`, `assignNew` ack, `reportText` get the defend case. `assignNew` ack for defend: `defending`.
 
-### Fields `!status` needs from S1's `BotStatusView`
-S1 owns the interface; S5 reads exactly these names (S1: please include them; if S1 names differ the contract writer renames in `messages.ts` only):
+### Fields `!status` needs from `BotStatusView`
+`BotStatusView` is defined in S1 §1. D25: S5's shape wins, so S1 **must** define exactly these names and types (the contract writer does not rename; S5 and S6 assertions use them); any field below that is absent from S1 §1 is added there:
 ```ts
 layer: LayerKind;                    // "reflex" | "combat" | "task" | "idle"
-option: OptionKind;                  // current committed option
+option: OptionKind;                  // current committed option; meaningful only while layer === "combat" (S1)
 target?: { typeId: string };         // current combat target
 hp: number; maxHp: number; hunger: number;       // hunger 0..20 (food level)
-recovering: boolean;                 // post-escape / post-fight recovery
+recovering: boolean;                 // true while the controller state is RECOVER or `carry.recover` is set (post-escape / post-fight recovery)
 gear: { weaponTypeId?: string; armorPieces: number /* 0..4 */; hasShield: boolean; foodCount: number };
 ```
-Runtime pushes `botStatus` per live bot at most every `statusPushTicks`, and only when `layer`, `option`, `target?.typeId`, `Math.round(hp)`, `Math.round(hunger)`, `recovering` or `gear` changed.
+Runtime pushes `botStatus` per live bot at most every `statusPushTicks` (20), when `layer`, `option`, `target?.typeId`, `Math.round(hp)`, `Math.round(hunger)`, `recovering` or `gear` changed, **and** re-pushes the current status every `statusHeartbeatTicks` (80) when nothing changed, so a long stable fight is never older than 80 ticks and the 100-tick stale hide (§7) cannot fire while the bot is still reporting.
 
 ## 6. Chat strings (`src/core/colony/messages.ts`, key = message id)
 
-Colony-voice lines are bare strings (the runtime adds `§7[Colony]§r`). Bot-voice lines go through `botSay` (the runtime adds `<Bot-1> `). `{pos}` = `fmtPos`, `plural(n, w)` = existing helper, `{secs}` = `offerSecs()`, `{p}` = command prefix. Em dash is U+2014, ellipsis is U+2026.
+Colony-voice lines are bare strings (the runtime adds `§7[Colony]§r`). Bot-voice lines go through `botSay` (the runtime adds `<Bot-1> `). `{pos}` = `fmtPos`, `plural(n, w)` = existing helper, `{secs}` = `offerSecs()`, `{p}` = command prefix. The `fmtPos` rounding (integer when whole, else one decimal) applies to every `{pos}`. Em dash is U+2014, ellipsis is U+2026.
 
 | id | voice / to | when | exact text |
 |---|---|---|---|
@@ -399,13 +415,28 @@ Colony-voice lines are bare strings (the runtime adds `§7[Colony]§r`). Bot-voi
 | `rejoinFailed(bot, reason)` | colony / owner (`"all"` if unclaimed) | `botRejoinFailed` cause != `summon` | `Couldn't bring {bot} back: {SNAPSHOT_FAIL_TEXT[reason]}. Its items are kept.` |
 | `rejoinDeferred(bot, owner, p)` | colony / `"all"` | notice `rejoinDeferred` | `{bot} stays dismissed until {owner} returns. Anyone can type {p}summon {bot}.` (`owner` = `its owner` if unknown) |
 | `rosterRestored(n)` | colony / `"all"` | `rosterRestored`, `n > 0` | `Restored {plural(n,"saved bot")}.` |
-| `equipNeed(item)` | bot / owner | notice `equipNeed` (S3 equipment manager) | `I need {a\|an} {item} — put one in the colony chest.` (`an` if the item starts with a, e, i, o, u; otherwise `a`) |
+| `equipNeed(need, low, chestSet)` | bot / owner | notice `equipNeed` (S3 equipment manager, D24). `chestSet` = `colony.chest !== undefined` at render time. First matching row of the sub-table below | see the sub-table |
 | `chestFull` | bot / owner | notice `chestFull` (deposit refused) | `The colony chest is full.` |
 | `excludedDropped(count, pos)` | bot / owner | notice `excludedDropped` (S4: items not snapshot-able dropped) | `Dropped {plural(count,"item")} I can't carry offline at {pos}.` |
 | `restoreLeftover(count)` | bot / owner | notice `restoreLeftover` | `Couldn't restore {plural(count,"item")} — kept in my snapshot.` |
 | `statusAbsent(bot, owner)` | colony / sender | status of a dismissed bot | `{bot}: dismissed` + (owner known ? ` (owner {owner})` : ``) |
 | `statusLeaving(bot)` | colony / sender | status of a leaving bot | `{bot}: leaving` |
 | `statusRejoining(bot, activity?, issuer?)` | colony / sender | status of a rejoining bot | `{bot}: rejoining` + (task kept ? ` · {activity} for {issuer}` : ``) |
+
+`equipNeed` variants (exact; `{need}` is the `AskNeed` value verbatim: `weapon`, `shield`, `helmet`, `chestplate`, `leggings`, `boots`). The first six are S3's cases; the last two cover `askForMissingGear` (S3 `cfg.askForMissingGear`, default false):
+
+| # | `need` | `low` | `chestSet` | exact text |
+|---|---|---|---|---|
+| 1 | `weapon` | false | true | `I have no weapon. Please put a sword in the colony chest.` |
+| 2 | `weapon` | false | false | `I have no weapon. Please give me a sword.` |
+| 3 | not `food` | true | true | `My {need} is almost broken. Please put a spare in the colony chest.` |
+| 4 | not `food` | true | false | `My {need} is almost broken. Please give me a spare.` |
+| 5 | `food` | any | true | `I am out of food. Please put some in the colony chest.` |
+| 6 | `food` | any | false | `I am out of food. Please give me some.` |
+| 7 | not `weapon`, not `food` | false | true | `I have no {need}. Please put one in the colony chest.` |
+| 8 | not `weapon`, not `food` | false | false | `I have no {need}. Please give me one.` |
+
+There is no a/an article rule any more. Rows are matched top to bottom; `weapon` with `low = true` matches row 3/4.
 
 Shared tables in `messages.ts`:
 ```ts
@@ -416,10 +447,13 @@ const SNAPSHOT_FAIL_TEXT: Record<SnapshotFailReason, string> = {
   spawn_failed: "the spawn failed",
   name_in_use: "the old copy is still leaving; try again",
   owner_offline: "its owner is offline",
+  storage_full: "the colony's save space is full",   // D7 / S4b H7; used by dismissFailed, summonFailed and rejoinFailed
   error: "something went wrong",
 };
 ```
-Routing of `botNotice` (D9): resolve `name` (and `botId` if given) to a **live** record; bot-voiced notices go `botSay(rec, rec.owner?.id ?? "all", text)`. If no live record resolves, bot-voiced notices are dropped (logged by the runtime) except `rejoinDeferred` (always colony voice, never needs a record).
+Routing of `botNotice` (D9, S4b H1): resolve `name` (and `botId` if given, name wins) to a record in **any presence** (`live`, `leaving`, `rejoining`): dismiss and escape notices (`chestFull`, `excludedDropped`, `restoreLeftover`) are sent while the record is `leaving` or `rejoining`. Bot-voiced notices go `botSay(rec, rec.owner?.id ?? "all", text)`; `botSay` takes the `<Bot-N> ` prefix from `rec.name`, so it needs no body. If no record resolves (the bot is `dismissed` or unknown), bot-voiced notices are dropped (logged by the runtime) except `rejoinDeferred` (always colony voice, never needs a record). Before routing, the per-key limit of §4.9 applies (`noticeMinIntervalTicks` = 200).
+
+**Id coverage.** Every message id used anywhere in §3 to §9 is a key of this table, or is a Phase 1/2 id that already exists in `messages.ts` (`unknownBot`, `offerBusyBot`, `noLongerOnTask`, `reassigned`, `reassignedDone`, `nothingToQueue`, `offerExpired`, `onMyWay`, `botLeftRequeued`, `left`, `pickingUp`, `arrived`, `failed`, `noBots`, `tooMany`, `statusIdle`, `statusBusy`). Test TC-B7-ids (§10) enforces both directions.
 
 Voice rules for the S4/S3 writers: a message that may be sent while the bot has no body (dismissed, rejoining) must be colony voice; the ids marked "colony" above are the only ones S4 may rely on for that.
 
@@ -427,13 +461,13 @@ Voice rules for the S4/S3 writers: a message that may be sent while the bot has 
 
 Phase 1/2 lines are unchanged **when there is no fresh combat info and presence is live**: `Bot-1: idle`, `Bot-1: going to 1 2 3 for Alex`, `Bot-1: gathering oak_log 7/16 for Alex`, then `Queued: N`.
 
-Template for a live bot with fresh combat info (`status` present and `now - at < statusStaleTicks`):
+Template for a live bot with fresh combat info (`status` present and `now - at <= statusStaleTicks`, i.e. age 100 is still shown, age 101 is hidden; D8):
 
 ```
 {base} · {fight?} · HP {hp}/{maxHp} · food {hunger}
 ```
 - `{base}` = the existing `statusBusy` / `statusIdle` text, unchanged.
-- `{fight?}` (omitted when empty), by `status.layer` / `status.option`:
+- `{fight?}` (omitted when empty), by `status.layer` / `status.option`. **Guard:** the option rows apply only when `status.layer === "combat"`. For layer `task` or `idle` the `{fight?}` segment is omitted unless `recovering` is true (then `recovering`); a stale `attack` option under layer `task` never prints "fighting":
 
 | condition | text |
 |---|---|
@@ -444,7 +478,7 @@ Template for a live bot with fresh combat info (`status` present and `now - at <
 | option `retreat` | `retreating from {mob}` (no target: `retreating`) |
 | option `flee` | `fleeing from {mob}` (no target: `fleeing`) |
 | option `eat` | `eating` |
-| option `escape_rejoin` | `escaping` |
+| option `escape_rejoin` | `escaping` (the combat/status view of S1; the roster line `rejoining` of a bot already offline is separate) |
 | `recovering` and nothing above applied | `recovering` |
 | option `resume_task` / `idle` and not recovering | omitted |
 
@@ -457,12 +491,16 @@ Examples:
 - `Bot-2: idle · HP 20/20 · food 20`
 - `Bot-3: defending 100 64 200 (r16) for Alex · retreating from creeper · HP 6/20 · food 9`
 - `Bot-1: gathering oak_log 7/16 for Alex · recovering · HP 8/20 · food 14`
+- `Bot-2: idle · escaping · HP 5/20 · food 12` (layer `combat`, option `escape_rejoin`)
+- `Bot-3: gathering oak_log 2/16 for Alex · HP 20/20 · food 20` (layer `task` with a stale option `attack`: no fight segment)
 - non-live: `Bot-4: dismissed (owner Alex)`, `Bot-4: leaving`, `Bot-4: rejoining · gathering oak_log 7/16 for Alex`
 
 `!status <bot>` (single bot, fresh info) adds a second reply line:
 `{bot} gear: {weapon} · armor {n}/4 · {shield} · {k} food` where `weapon` = `shortId(weaponTypeId)` or `no weapon`, `shield` = `shield` or `no shield`, `n` = `armorPieces`, `k` = `foodCount`. Example: `Bot-1 gear: iron_sword · armor 3/4 · shield · 5 food`. (`!status` without a name never prints gear lines.)
 
 Order of lines for `!status`: one line per roster entry by `seq` (live, leaving, rejoining, dismissed), then `Queued: N`. With an empty roster: `No bots yet. Type !spawn.`.
+
+The S1 threat/escape details beyond these fields are not part of `BotStatusView` (D25), so there is no separate `threat:` segment: the fight segment (`fighting zombie`, `retreating from creeper`, `escaping`) is the threat display.
 
 New `msg` helpers: `statusCombat(base, segments[])` (joins), `statusGear(bot, ...)`; the segment builder lives in `messages.ts` as `combatSegments(status, now)`, pure and unit-tested.
 
@@ -488,10 +526,14 @@ New `msg` helpers: `statusCombat(base, segments[])` (joins), `statusGear(bot, ..
 
 ## 9. Config keys (S5)
 
+The `colony` group (`ColonyConfig`) is listed in PHASE3-SPEC §4 `Phase3Config` (the Lead adds `colony: ColonyConfig` there; the contract writer generates `config.ts` from it).
+
 | Key (in `ColonyConfig` / `DEFAULT_CONFIG`) | Default | Unit | Meaning |
 |---|---|---|---|
-| `statusStaleTicks` | 100 | ticks | A pushed `botStatus` older than this is not shown by `!status` |
-| `statusPushTicks` | 20 | ticks | Minimum spacing between `botStatus` events per bot (runtime throttle; only on change) |
+| `statusStaleTicks` | 100 | ticks | A pushed `botStatus` is shown while `now - at <= statusStaleTicks`; older is hidden |
+| `statusPushTicks` | 20 | ticks | Minimum spacing between `botStatus` events per bot (runtime throttle for changes) |
+| `statusHeartbeatTicks` | 80 | ticks | Re-push the current status this often even when unchanged (must be < `statusStaleTicks`) |
+| `noticeMinIntervalTicks` | 200 | ticks | Core drops a `botNotice` with the same bot name and id that was delivered less than this long ago (10 s) |
 | `flowTimeoutTicks` | 600 | ticks | `leaving` / `rejoining` states with no completion event revert after this (30 s) |
 | (existing) `maxBots` | 3 | bots | Now counts live + dismissed + pending bots |
 | (existing) `offerTtlTicks` | 600 | ticks | Also applies to pinned offers |
@@ -502,9 +544,22 @@ Constants (parser has no config access), exported from `src/core/commands/specs.
 
 Parser (`test/commands-p3.test.ts`): every row of §3.3 (error + usage line); happy paths: `!defend` -> radius 16 count 1; `!defend 24 3`; `!defend STOP`; `!home`, `!home SET`; `!summon`, `!summon all`, `!summon ALL`, `!summon @Bot-1`, `!dismiss Bot-2`; `!recall`; `COMMAND_SPECS` order; derived usage lines of §3.2; `/colony:c defend 24 3` join; extend the "covers every command kind" list; `helpText()` lists the five new usages.
 
-Colony (`test/colony-p3.test.ts`): owner set by spawn, claimed by first assign, never overwritten; defend allocation (idle first, own non-defend before own defend before others'), offer/override/queue with defend, `!defend stop` scope, defend requeue on preempt; `!home` set/show/none and `persistMeta` emission count (exactly one per changing event, none otherwise); dismiss: own, idle, other's busy -> pinned offer -> override requeues the victim task, `all` skips others' busy, `botDismissed` cause texts, `botDismissFailed`, timeout; summon: dismissed -> `summonBot` effect + `rejoining` -> `botRejoined`/`botRejoinFailed`/timeout, live bot walk, pinned summon; escape: `botEscaped` keeps task, `botRejoined` re-`assign`s with `delivered` folded, `!stop` while rejoining clears the task, failed escape rejoin requeues; `maxBots` counts absent; `nameReserved`; `allDismissed`/`tooManyAway`; `rosterRestored`; `botNotice` routing and `equipNeed` article; recall (home vs sender, drops counted, skipped busy-for-other); status lines (all templates in §7, staleness, gear line); snapshot fields (`presence`, `owner`, `home`, non-live `id`). Phase 1/2 tests pass unchanged.
+Colony (`test/colony-p3.test.ts`): owner set by spawn, claimed by first assign, never overwritten; defend allocation (idle first, own non-defend before own defend before others'), offer/override/queue with defend, `!defend stop` scope, defend requeue on preempt; `!home` set/show/none and `persistMeta` emission count (exactly one per changing event, none otherwise); dismiss: own, idle, other's busy -> pinned offer -> override requeues the victim task, `all` skips others' busy, `botDismissed` cause texts, `botDismissFailed`, timeout; summon: dismissed -> `summonBot` effect + `rejoining` -> `botRejoined`/`botRejoinFailed`/timeout, live bot walk, pinned summon; escape: `botEscaped` keeps task, `botRejoined` re-`assign`s with `delivered` folded and `haulDropped` folded (H3 example: 3 + min(12, 12) = 15), non-gather tasks re-assigned unchanged, duplicate `botRejoined` for a live name ignored, `!stop` while rejoining clears the task, failed escape rejoin requeues; `maxBots` counts absent; `nameReserved`; `allDismissed`/`tooManyAway`; `rosterRestored`; `botNotice` routing (any presence, H1) and the eight `equipNeed` variants of §6 (exact strings, chest set / not set, `low`, food); `botNotice` rate limit (second identical notice within 200 ticks dropped, after 200 delivered); recall (home vs sender, drops counted, skipped busy-for-other); status lines (all templates in §7, staleness at age 100 shown / 101 hidden, layer guard, gear line, heartbeat refresh); snapshot fields (`presence`, `owner`, `home`, non-live `id`). Phase 1/2 tests pass unchanged.
 
-B7: `test/help.test.ts` extra-line cases for the five topics; `PLAYTEST.md` Phase 3 manual list: `!home set` then escape/recall destination, dismiss then summon from far away, someone else's busy bot dismiss -> override, reload with owner online/offline, `!defend` with 2 bots vs a zombie, `!status` combat line.
+B7: `test/help-p3.test.ts` (new file; `test/help.test.ts` stays untouched and passes unchanged) extra-line cases for the five topics; `PLAYTEST.md` Phase 3 manual list: `!home set` then escape/recall destination, dismiss then summon from far away, someone else's busy bot dismiss -> override, reload with owner online/offline, `!defend` with 2 bots vs a zombie, `!status` combat line.
+
+Additional cases (each: input -> expected message id and state change):
+- `TC-B6-offer-expiry`: `!dismiss Bot-1` on a bot busy for Bob creates a pinned offer at tick 0; tick sweep at `offerTtlTicks` (600) -> `offerExpired` to the requester, `s.offers` has no entry for the requester, Bot-1 still live and on Bob's task; `!override` at tick 601 -> `nothingToOverride`.
+- `TC-B6-defend-no-home`: no home set; Alex `!defend` with an idle bot -> `defending` ack (`Defending {pos} (radius 16).`), `assign` effect with a `defend` task, no error; then `!recall` -> goto `sender.pos`, `recalling(1, "you", 1)`.
+- `TC-B6-dismiss-all-escaping`: Bot-1 live (Alex), Bot-2 `rejoining` after `botEscaped`; Alex `!dismiss all` -> only Bot-1 gets `dismissBot`, reply `dismissing(Bot-1)`; with only Bot-2 present -> `dismissNone`; `!dismiss Bot-2` -> `botAway(Bot-2, "rejoining")` = `Bot-2 is rejoining.`; no state change on Bot-2.
+- `TC-B6-owner-leaves`: Alex owns Bot-1 and goes offline (no event reaches the core; owner is a game-side fact): `rec.owner` unchanged (no transfer); Bob `!dismiss all` skips it (`isMine` false), Bob `!summon Bot-1` on a dismissed Bot-1 is allowed (D3); `rosterRestored` with the owner offline leaves the bot `dismissed` and S4's `rejoinDeferred` notice renders `Bot-1 stays dismissed until Alex returns. Anyone can type !summon Bot-1.`
+- `TC-B6-recall-unloaded`: home `(12, 64, 3)`; Bot-1 live but far/unloaded; `!recall` -> goto `(12.5, 64, 3.5)`; then `taskReport failed unreachable` -> bot-voiced `Couldn't reach 12.5 64 3.5: no path.`; Bot-1 idle afterwards.
+- `TC-B6-dismiss-during-escape`: `botDismissFailed { reason: "busy" }` for a bot whose escape started first -> `Couldn't dismiss Bot-1: it is busy right now.`; record back to `live` (Q11).
+- `TC-B6-late-completions`: `botDismissed` after the leaving timeout (task requeued at the front, `botLeftRequeued`); late `botRejoinFailed` ignored; late `botDismissFailed` ignored.
+- `TC-B7-ids`: the set of message-id keys in `messages.ts` equals the ids in the §6 table plus the Phase 1/2 ids listed under "Id coverage"; every id string appearing in §3 to §9 of this file is in that set.
+- `TC-B7-help-lists-all`: `helpText()` contains each of the five new usage lines of §8 and every Phase 1/2 usage line, in `COMMAND_SPECS` order.
+- `TC-B7-parse-error-usage`: one case per row of §3.3 (`!defend 3`, `!defend stop 2`, `!defend 16 0`, `!defend 16 2 9`, `!home foo`, `!summon @@x`, `!recall now`): reply is the exact error text followed by the usage line of that command.
+- `TC-B7-status-fight`: the layer guard (stale `attack` under layer `task` prints no fight segment), the `escaping` example, age 100 shown / 101 hidden.
 
 ## 11. Open questions (chosen fallbacks)
 
@@ -520,3 +575,52 @@ B7: `test/help.test.ts` extra-line cases for the five topics; `PLAYTEST.md` Phas
 | Q8 | Is the entity id stable across rejoin? | Assumed **no**. Everything is keyed by name across a rejoin; `botRejoined` carries the new `botId`. If S4 finds ids are stable, nothing changes. |
 | Q9 | Idle-dismissed bots whose owner never returns. | Stay `dismissed`; anyone may `!summon` them. They keep a `maxBots` slot (D7). |
 | Q10 | Two players race to dismiss/summon the same bot. | Second command sees `leaving`/`rejoining` and gets `botAway`. |
+| Q11 | `!dismiss` on a bot whose escape the controller has decided but `botEscaped` has not arrived yet (the core still sees `live`). | No new message id. The `dismissBot` effect reaches S4's service, which refuses with `busy` while an escape flow is active (S4b L1); the core gets `botDismissFailed { reason: "busy" }`, reverts the record to `live` and replies `Couldn't dismiss {bot}: it is busy right now.` Once `botEscaped` has arrived the record is `rejoining` and `!dismiss <bot>` gives `botAway` (`{bot} is rejoining.`); `all` skips it. |
+
+---
+
+## Revision log (review pass 1)
+
+Decisions applied: D7 (`storage_full` in `SnapshotFailReason` and `SNAPSHOT_FAIL_TEXT`), D21 H1 (notice routing by name in any presence), H3 (`haulDropped` fold and optional event fields), H7 (text `the colony's save space is full`), D24 (`equipNeed { need, low }` with S3's six wordings plus two), D25 (S5's `BotStatusView` shape; S1 must match), D26 (core is the single task owner on escape rejoin; carry has no task), D8 as binding (`<=` 100).
+
+S5-commands--completeness.md
+- #1: changed (D24 wins: one `equipNeed { need, low }` notice with eight rendered variants instead of `ask_*` ids; S3 already emits it and has no chat text)
+- #2: applied (`TC-B7-ids` both directions; "Id coverage" paragraph lists the Phase 1/2 ids; every new id was already in the table)
+- #3: skipped (D25 fixes the `BotStatusView` fields and has no threat count, distance or `escapePending`; the fight segment and the `escaping` example are the threat display; `TC-B7-status-fight` added)
+- #4: changed (sentence now: `BotStatusView` is defined in S1 §1 and S1 must use exactly S5's names, D25 / consistency #3)
+- #5: applied (all seven test cases added to §10, plus `TC-B6-dismiss-during-escape` and `TC-B6-late-completions`)
+- #6: changed (Q11 added with a fallback, but no `dismiss_blocked_escape` id: S4b L1 already refuses with `busy` while an escape flow is active, rendered by `dismissFailed`; after `botEscaped` `botAway` applies)
+- #7: applied (`noticeMinIntervalTicks` = 200 in §9, state `lastNotice` in §4.9, cited in §6 routing; flat key name instead of `notices.minIntervalTicks` to match `ColonyConfig`)
+
+S5-commands--consistency.md
+- #1: applied (D24: `AskNeed` and the new `BotNotice.equipNeed` in §5, eight-row variant table in §6, test text "six variants" now eight; message id is the single `equipNeed(need, low, chestSet)`)
+- #2: applied (§4.7 single-owner sentence; per D26 the carry holds `brainState`, `recover`, `objectiveItemIds`, `stats` only)
+- #3: applied (S1 must define exactly the listed names; `recovering` provenance stated)
+- #4: applied (`OptionKind`, `LayerKind` imported)
+- #5: applied (`test/help-p3.test.ts`; the PHASE3-SPEC B7 row is the Lead's)
+- #6: applied (no change in S5; `HomeRef` stays)
+- #7: changed (S5 §9 notes that the `colony` group is listed in PHASE3-SPEC §4; adding it there is the Lead's)
+
+S5-commands--game-api.md: no findings.
+
+S5-commands--logic.md
+- #1: changed (D26 wins: a rejoin does re-emit `assign`, so "never emits" is rejected; the idempotence half is applied: an executor with the same task id is replaced silently, never run twice)
+- #2: applied (`statusHeartbeatTicks` = 80, §0 D8, §5, §9)
+- #3: skipped (D25 lists `recovering` in the binding `BotStatusView`; its provenance is defined instead)
+- #4: changed (late completions are applied when they report a physical fact: `botDismissed` and `botRejoined` are handled as normal, with the task requeued per precision #13; late failures are ignored and logged; an `expired` flag would orphan a real body)
+
+S5-commands--precision.md
+- Skipped as already decided (reviewer note): D6, D7, D11.
+- #1: applied (layer guard in §7, example, test)
+- #2: applied (`<=` in §0, §5 comment via §7, §9, tests)
+- #3: applied (`+0.5` rule in §2 and §4.8 with an example)
+- #4: applied (`"stopped"` in both summon paths)
+- #5: applied (§4.7 step 4: drop silently only for gather)
+- #6: applied (duplicate `botRejoined` guard)
+- #7: applied (`Unknown home action '{echo}'. Use {p}home or {p}home set.`)
+- #8: applied (`/^[0-9]+$/` rule, `toLowerCase()` comparisons)
+- #9: applied (`parseArg` to `Values` mapping)
+- #10: applied (`BotView.id` comment)
+- #11: applied (checked `src/core/colony/messages.ts`: `fmtPos` prints one decimal when not whole; rule and a worked example added, examples keep whole coordinates)
+- #12: skipped (obsolete after D24: `{need}` is the plain `AskNeed` word and there is no article)
+- #13: applied (late `botDismissed` requeues the task at the queue front and sends `botLeftRequeued`)

@@ -1,22 +1,23 @@
 # S2b: decide(), commitment, targets, food choice, tactic selection, outcome stats
 
 Owner of: `decide`, `Decision`, `BrainState`, `Commit`, `EngagementRecord`, `OutcomeStats`, `TacticStat`, `FoodSituation`, `FoodChoice`, `TerrainFacts`, `TacticFeedback`, and the `config.combat` keys of section 8.
-Not owned (S2a exports, used here by name only): `computeDerived`, `scoreOptions`, `Derived`, `OptionScores`, `Knowledge`, `CombatConfig`, `Rng`, `FoodEntry`.
+Not owned (S2a exports, used here by name only): `computeDerived`, `scoreOptions`, `Derived`, `OptionScores`, `Knowledge`, `CombatConfig`, `Rng`, `FoodEntry`, `FoodTag`, `FoodEffect`, `hasUsableShield`, `ALWAYS_EDIBLE`, `EMERGENCY_FOODS`, `ATTACK_NEAR_BLOCKS`, `clamp`. Owned here and read by S2a: `criticalHp`, `switchMargin` (D3: one definition each, section 8).
+Import rule (D22): `stats.ts` exports `evalCondition` and `CondEnv` and has **no import of `scoring.ts`**. `brain.ts` imports `scoring.ts` and `stats.ts`; `scoring.ts` imports `stats.ts`.
 Builder: **B1** (`src/core/combat/brain.ts`, `src/core/combat/stats.ts`; pure, no `@minecraft/*`, no clock, no `Math.random`). Contract writer: every code block goes into the file named above it.
 
 Conventions: distances in blocks, times in ticks (20/s), HP in points. "Pump" = 4 ticks. `now = p.now`. All `cfg.*` keys are `config.combat` keys (section 8 plus S1 section 10 plus S2a). Strict `<` for "below", `>=` for "at least". Functions never mutate their arguments; `decide` returns a new `BrainState`.
 
 ## 0. Interface assumptions (S2a, S1, S3, B2)
 
-S2b reads **no field of `Derived`**: it only passes `d` to `scoreOptions`. Target ordering uses its own `timeToKillTicks` (section 4). Knowledge access goes through three accessors that the Reconciler maps to S2a's real `Knowledge` members:
+S2b reads exactly **two fields of `Derived`**: `d.canEatSafely` and `d.canEatEmergency` (D23: the eat guard is S2a's, S2b has no eat-distance threshold of its own). Everything else in `d` is only passed to `scoreOptions(p, d, kb, cfg)`. Target ordering uses its own `timeToKillTicks` (section 4). `kb` is S2a's `Knowledge` (D1); S2b uses its members `mob`, `food` and `value` exactly as S2a defines them (S2a 1.1), through three one-line aliases:
 
 ```ts
 // brain.ts, private
 const mobOf = (kb: Knowledge, typeId: string): MobEntry => kb.mob(typeId);              // = lookupMob(..., typeId) (S3 2.3); never undefined
 const foodOf = (kb: Knowledge, typeId: string): FoodEntry | undefined => kb.food(typeId); // = foodEntry(typeId) (food.ts)
-const valueOf = (kb: Knowledge, typeId: string): number => kb.value(typeId);              // per-item base value (TABLES 4.6 rules 4.3.3-5)
+const valueOf = (kb: Knowledge, typeId: string): number => kb.value(typeId);              // per-item base value (S2a 1.1: `value(typeId, maxAmount?)`, one argument is valid)
 ```
-`FoodEntry` fields read: `id, hunger, saturation, eatTicks, tags: FoodTag[], returnsItem?`. `FoodTag = "topup"|"main"|"raw"|"stew"|"avoid"|"emergency"|"escape"|"fast"|"regen"` (TABLES 2). Imports: `weaponDamage` (S1 6.5), `WEAPON_DAMAGE`, `dist3` (S1 7.2), `Condition`, `MobEntry`, `TacticName` (S3 2).
+`FoodEntry` fields read (S2a 1.1): `id, hunger, saturation, eatTicks, tags: FoodTag[], effects: FoodEffect[], returnsItem?`. `FoodTag` and `FoodEffect` are S2a's types (`FoodTag = "topup"|"main"|"raw"|"stew"|"avoid"|"emergency"|"escape"|"fast"|"regen"`). Imports: `weaponDamage` (S1 6.5), `WEAPON_DAMAGE`, `dist3` (S1 7.2), `Condition`, `MobEntry`, `TacticName` (S3 2); from `scoring.ts` (brain.ts only): `hasUsableShield`, `ALWAYS_EDIBLE`, `EMERGENCY_FOODS`, `ATTACK_NEAR_BLOCKS`.
 
 **Percept additions requested from S1** (all optional so S1's builders compile unchanged; section 9 has the owner list):
 
@@ -131,24 +132,29 @@ export function onBotDeath(s: BrainState, now: Tick, cfg: CombatConfig): BrainSt
 export function chooseFood(situation: FoodSituation, self: SelfPercept, ctx: FoodContext, kb: Knowledge, cfg: CombatConfig): FoodChoice | undefined;
 export interface FoodContext {
   objectiveItemIds: readonly string[];
-  /** Threat-classified entities (any relevance), nearest first, as {distance, typeId}. Empty = none. */
+  /** Threat-classified entities (any relevance) with distance <= cfg.scanRadius, nearest first, as {distance, typeId}. Empty = none. Same set as S2a's Derived.threats. */
   threats: ReadonlyArray<{ distance: number; typeId: string }>;
   escapeAvailable: boolean;
+  /** = Derived.canEatSafely (S2a 3.11, D23). The only distance/time guard of the normal, pre_engage_heal and starving situations. */
+  canEatSafely: boolean;
+  /** = Derived.canEatEmergency (S2a 3.11, D23). The guard of the emergency and escape_teleport situations. */
+  canEatEmergency: boolean;
 }
 export function selectTarget(p: Percept, kb: Knowledge, cfg: CombatConfig, option: OptionKind, prevTargetId: string | undefined): EntityPercept | undefined;
 export function timeToKillTicks(e: EntityPercept, p: Percept, kb: Knowledge, cfg: CombatConfig): number;
 
 // src/core/combat/stats.ts
-export function evalCondition(c: Condition, env: CondEnv): boolean;
+export function evalCondition(c: Condition, env: CondEnv): boolean;     // + `export interface CondEnv` (section 6.1); S2a imports both; stats.ts never imports scoring.ts (D22)
+export function makeCondEnv(p: Percept, e: EntityPercept, entry: MobEntry, cfg: CombatConfig, botHasShield: boolean): CondEnv;   // section 6.1
 export function allowedTactics(entry: MobEntry, env: CondEnv, option: OptionKind, bans: BrainState["banned"], now: Tick): TacticName[];
-export function selectTactic(p: Percept, s: BrainState, kb: Knowledge, cfg: CombatConfig, rng: Rng, option: OptionKind, target: EntityPercept): { tactic: TacticName | undefined; explored: boolean };
+export function selectTactic(p: Percept, s: BrainState, kb: Knowledge, cfg: CombatConfig, rng: Rng, option: OptionKind, target: EntityPercept, botHasShield: boolean): { tactic: TacticName | undefined; explored: boolean };
 export function utilityOf(stat: TacticStat | undefined, rank: number, cfg: CombatConfig): number;
 export function recordOutcome(st: OutcomeStats, mobKey: string, tactic: TacticName, o: EngagementOutcome, damage: number, ticks: number, clean: boolean, cfg: CombatConfig): OutcomeStats;
 export function serializeStats(st: OutcomeStats): string;       // section 6.5
 export function parseStats(json: string | undefined): OutcomeStats;   // never throws; invalid => fresh
 ```
 
-`ControllerDeps.brain` (S1 `BrainFn`, no rng) is bound by the runtime: `(p, s, kb, cfg) => { const r = decide(p, s, kb, cfg, rng); return { decision: r.decision, brainState: r.state }; }` with the runtime's seeded `Rng`. `chooseFood` dep: `(sit, self) => chooseFood(sit, self, { objectiveItemIds: [], threats: [], escapeAvailable: true }, kb, cfg)?.typeId` (used only for RECOVER, where no threat is near).
+`ControllerDeps.brain` (S1 `BrainFn`, no rng) is bound by the runtime: `(p, s, kb, cfg) => { const r = decide(p, s, kb, cfg, rng); return { decision: r.decision, brainState: r.state }; }` with the runtime's seeded `Rng`. `kb` is S2a's `KNOWLEDGE` (knowledge.ts). `chooseFood` dep: `(sit, self) => chooseFood(sit, self, { objectiveItemIds: [], threats: [], escapeAvailable: true, canEatSafely: true, canEatEmergency: true }, kb, cfg)?.typeId` (used only for RECOVER, where no threat is near, so both guards are true).
 
 ---
 
@@ -163,8 +169,8 @@ Every step is deterministic; `rng` is called in exactly one place (section 6.3 s
    c. Drop expired bans (`banned[t] <= now`).
    d. Gap: `gap = s.lastTick === undefined ? 0 : now - s.lastTick`. If `gap > cfg.commitStaleTicks` or `p.layer === "reflex"`: `interrupt = "reflex_gap"` (the brain was not running: reflex, handoff or dispose). If `gap > cfg.engageGapTicks`: end the engagement as `abandon` (section 6.4 rule A8).
 3. `d = computeDerived(p, kb, cfg)`; `raw = scoreOptions(p, d, kb, cfg)`.
-4. **Sets.** `threats` = entities with `classification === "threat"` and `relevance !== "irrelevant"`. `attackable` = threats with `attackAllowed` and (`inLeash` or `distance <= 3.5`) (S1 L1).
-5. **Food.** `food = chooseEat(p, s, kb, cfg)` (section 5.1) or `undefined` when `now < s.eatBanUntil`.
+4. **Sets.** `threats` = entities with `classification === "threat"` and `relevance !== "irrelevant"`. `attackable` = threats with `attackAllowed` and (`inLeash` or `distance <= ATTACK_NEAR_BLOCKS` (3.5)) (S1 L1); identical to S2a's `ThreatEval.attackable`.
+5. **Food.** `food = chooseEat(p, s, d, kb, cfg)` (section 5.1) or `undefined` when `now < s.eatBanUntil`.
 6. **Hard interrupts** (section 3.3), in order; the first that fires sets `interrupt` and clears `s.commit` (the engagement is not touched, it ends by its own rules).
 7. **Masks.** `m = copy of raw`, `masked = []`. Set `m[k] = -Infinity` (and push `k`) when:
 
@@ -172,7 +178,7 @@ Every step is deterministic; `rng` is called in exactly one place (section 6.3 s
    |---|---|
    | any | `!Number.isFinite(raw[k])` and `raw[k] !== -Infinity` (NaN, +Infinity) |
    | attack | `attackable.length === 0`; or critical mask (below) |
-   | shield | `!botHasShield(p, cfg)` or `p.shieldDisabled === true` or `threats.length === 0` |
+   | shield | `!hasUsableShield(p, cfg)` or `p.shieldDisabled === true` or `threats.length === 0` |
    | back_off | `threats.length === 0` |
    | eat | `food === undefined` |
    | escape_rejoin | `p.escapeAvailable === false` |
@@ -183,19 +189,12 @@ Every step is deterministic; `rng` is called in exactly one place (section 6.3 s
 8. **Pick** (section 3.2): `fallback = p.taskKind ? "resume_task" : "idle"`; `best = argmaxOption(m, fallback)`; `chosen = s.commit ? holdOrSwitch(s.commit, m, best, now, cfg) : best`.
 9. **Target.** `target = selectTarget(p, kb, cfg, chosen, s.commit?.option === chosen ? s.commit.targetId : undefined)` (section 4). If `chosen === "attack"` and `target` is undefined (cannot happen after the mask; defensive): `m.attack = -Infinity` and redo steps 8-9 once.
 10. **Tactic** (section 6.3): if `target` and `chosen` has a tactic class: `{tactic} = selectTactic(...)`; update `s.tactic`.
-11. **Food on the decision:** if `chosen === "eat"`: `fc = (s.commit?.option === "eat" && s.commit.food && stillHeld(self, s.commit.food)) ? s.commit.food : food`; set `foodTypeId, foodSlot, eatMode = fc.emergency ? "emergency" : "normal"`. `stillHeld` = `self.inventory.slots` has `slot === fc.slot` with `typeId === fc.typeId`. If the sticky food is gone and `food` is defined use `food`.
+11. **Food on the decision:** if `chosen === "eat"`: `fc = food` (`chooseEat` already returns the sticky choice of a committed meal, section 5.1); set `foodTypeId, foodSlot, eatMode = fc.emergency ? "emergency" : "normal"`. `stillHeld(self, fc)` = `self.inventory.slots` has `slot === fc.slot` with `typeId === fc.typeId` (used by `chooseEat`). If the sticky food is gone, `chooseEat` falls through to a fresh choice.
 12. **Commit update** (section 3.1): new `Commit` when `chosen !== s.commit?.option` or no commit; else refresh `score`, `targetId`, `food`.
 13. **Engagement update** (section 6.4).
 14. `moveTo` for `retreat`; `s.lastTick = now`; build `Decision` (`reason` per 3.4); return `{ decision, state: s }`.
 
-`botHasShield(p, cfg)`:
-```ts
-const off = p.self.equipment.offhand;
-const offShield = off?.typeId === "minecraft:shield";
-const slotItem = p.self.inventory.shieldSlot === undefined ? undefined : p.self.inventory.slots.find(i => i.slot === p.self.inventory.shieldSlot);
-const frac = offShield ? off!.durabilityFrac : slotItem?.durabilityFrac;
-return frac !== undefined && frac >= cfg.shieldMinDurabilityFrac && (p.canBlock ?? offShield);
-```
+**Shield predicate (D22).** S2b has no copy of `botHasShield`: it imports `hasUsableShield(p, cfg)` from `scoring.ts` (S2a 6; same body as the former local function, ignores `shieldDisabled`). `CondEnv.botHasShield = hasUsableShield(p, cfg)`, computed once in `brain.ts` and passed down (`stats.ts` cannot import `scoring.ts`, so `selectTactic` receives it as a parameter, section 1).
 
 ---
 
@@ -296,18 +295,27 @@ S2a's own time-to-kill may differ in detail; this function is authoritative only
 ### 5.1 `chooseEat` and the situation chain
 
 ```ts
-function chooseEat(p: Percept, s: BrainState, kb: Knowledge, cfg: CombatConfig): FoodChoice | undefined {
+function chooseEat(p: Percept, s: BrainState, d: Derived, kb: Knowledge, cfg: CombatConfig): FoodChoice | undefined {
   if (p.now < s.eatBanUntil || p.self.inventory.foods.length === 0) return undefined;
+  // D22: a committed meal skips the new-meal guard. S2a already scored `eat` with the shorter mid-meal margin (S2a 3.11), so the
+  // food is simply kept while it is still held; H3 (threat within eatInterruptDist) is the only interrupt.
+  const sticky = s.commit?.option === "eat" ? s.commit.food : undefined;
+  if (sticky && stillHeld(p.self, sticky)) return sticky;
   const ctx: FoodContext = {
     objectiveItemIds: p.objectiveItemIds ?? [],
-    threats: p.entities.filter(e => e.classification === "threat").map(e => ({ distance: e.distance, typeId: e.typeId })), // already distance-sorted
+    threats: p.entities.filter(e => e.classification === "threat" && e.distance <= cfg.scanRadius).map(e => ({ distance: e.distance, typeId: e.typeId })), // already distance-sorted
     escapeAvailable: p.escapeAvailable,
+    canEatSafely: d.canEatSafely,            // D23
+    canEatEmergency: d.canEatEmergency,      // D23
   };
   for (const sit of triggeredSituations(p, ctx, kb, cfg)) {   // fixed order below
     const c = chooseFood(sit, p.self, ctx, kb, cfg);
     if (c) return c;
   }
   return undefined;
+}
+function stillHeld(self: SelfPercept, fc: FoodChoice): boolean {
+  return self.inventory.slots.some(i => i.slot === fc.slot && i.typeId === fc.typeId);
 }
 ```
 `triggeredSituations` returns, in this order, every situation whose trigger holds (`H` = `self.hp`, `hunger = self.hungerKnown ? self.hunger : 20`, `missing = 20 - hunger`, `T16` = a threat with `distance <= cfg.emergencyHostileRange` (16), `Tany` = any threat in `ctx.threats`):
@@ -326,15 +334,15 @@ Melee threat = `!mobOf(kb, typeId).special.includes("ranged_projectile")`. The e
 
 Shared definitions (`hunger` and `missing` as above; `sat` = `self.saturation`):
 - `held(typeId)` = lowest-slot stack in `self.inventory.foods` with that typeId. The returned `slot` is that stack's slot.
-- `eligible(item)`: `foodOf` exists; `amount >= 1`; `item.typeId` not in `ctx.objectiveItemIds` (waived for `emergency`, `starving`); and `hunger < 20` or typeId in `ALWAYS_EDIBLE = [golden_apple, enchanted_golden_apple, chorus_fruit, honey_bottle]`. If `!self.hungerKnown`, `hunger` is taken as 20 (only always-edible foods are eligible).
+- `eligible(item)`: `foodOf` exists; `amount >= 1`; `item.typeId` not in `ctx.objectiveItemIds` (waived for `emergency`, `starving`); and `hunger < 20` or typeId in S2a's `ALWAYS_EDIBLE` (imported, not redefined: `golden_apple, enchanted_golden_apple, chorus_fruit, honey_bottle`). If `!self.hungerKnown`, `hunger` is taken as 20 (only always-edible foods are eligible).
 - `satGain(f) = min(min(20, hunger + f.hunger), sat + f.saturation) - sat` (TABLES 3).
 - **Never-in-these-tags rule:** `topup` and `pre_engage_heal` ignore items tagged `avoid`, `emergency`, `escape`. `topup` additionally excludes `minecraft:golden_carrot` (TABLES 3.3).
 - **Tie-break for every pick** (after the rule's own keys): lower `valueOf`, then shorter `eatTicks`, then alphabetical typeId.
-- **Guards** (computed from `ctx.threats`; `dn` = nearest threat distance or `Infinity`):
-  - normal: `dn > f.eatTicks / 20 * cfg.eatGuardThreatSpeed + cfg.eatGuardMargin` (5 and 2).
-  - emergency / escape_teleport: allowed unless a melee threat is within `cfg.eatMeleeBlockDist` (2.0) and `self.hp > cfg.emergencyHpAnyThreat` (4).
-  - poison items (`poison` in `effects`): additionally `self.hp >= cfg.poisonMinHp` (8) and no threat within 16.
-  - `pre_engage_heal` only: contact time `dn / cfg.eatGuardThreatSpeed * 20 >= f.eatTicks + cfg.preEngageContactMarginTicks` (20).
+- **Guards (D23).** There is no distance threshold in S2b. The old thresholds (`eatGuardMargin` 2 blocks, `preEngageContactMarginTicks` 20 ticks, and the `dn > eatTicks / 20 * 5 + 2` test) are removed; the speed floor `eatGuardThreatSpeed` and the margins live in S2a 3.11.
+  - normal, `pre_engage_heal`, `starving`: `ctx.canEatSafely` (S2a `Derived.canEatSafely`: `minEatContactTicks > eatNeedTicks + eatMarginTicks`, i.e. the nearest threat is more than 52 ticks from contact for a 32-tick meal).
+  - emergency / escape_teleport: `ctx.canEatEmergency` (S2a: no melee threat within `cfg.eatMeleeBlockDist` (2.0) unless `self.hp <= cfg.emergencyHpAnyThreat` (4)).
+  - poison items (`f.effects.some(e => e.id === "poison")`): additionally `self.hp >= cfg.poisonMinHp` (8) and no threat in `ctx.threats` within 16 (this guard is S2b's own; S2a does not model poison).
+  - `canEatSafely` uses S2a's reference meal length (`eatTicksRef`, normally 32); a food with a longer `eatTicks` (honey_bottle 40) is accepted on the same test (Q10).
 - Result: `{ typeId, slot, eatTicks: f.eatTicks, situation, emergency: situation === "emergency" || situation === "escape_teleport" }`. A candidate failing its guard makes that situation return `undefined` (no second-best is tried).
 
 Per situation:
@@ -343,8 +351,8 @@ Per situation:
 |---|---|
 | topup | `for tag of [topup, main, raw]`: `L = eligible items having tag` (after the exclusions). First tag with `L.length > 0` wins; stop looking at later tags. In `L`: `fit = L.filter(f.hunger <= missing)`; if `fit` non-empty pick max `f.hunger` (tie-break above). Else the smallest `f.hunger` item `g`: use it only if `g.hunger - missing <= 2`; else return `undefined`. |
 | pre_engage_heal | `for tag of [main, topup]`: first tag with an eligible item wins. Pick max `satGain`; tie max `f.hunger`; then the shared tie-break. |
-| emergency | First held of `[enchanted_golden_apple, golden_apple]` (fixed order). Eligible ignoring hunger and objective ids. |
-| starving | In order: (1) tags `topup, main, raw` by `fit_largest` ignoring `missing` (max `f.hunger`); (2) tag `stew` (excluding items also tagged `avoid`) max `f.hunger`; (3) `AVOID_ORDER` first held whose condition holds: rotten_flesh (none), chicken (none), spider_eye (HP >= 8), poisonous_potato (HP >= 8), suspicious_stew (HP >= 12), pufferfish (HP >= 12 and hunger <= 2); (4) `chorus_fruit`; (5) the emergency list, only if `self.hp <= cfg.emergencyHp`. First step that yields an item wins. Normal guard. |
+| emergency | First held of `EMERGENCY_FOODS` (S2a: `[enchanted_golden_apple, golden_apple]`, fixed order). Eligible ignoring hunger and objective ids. Guard `canEatEmergency`. |
+| starving | In order: (1) tags `topup, main, raw` by `fit_largest` ignoring `missing` (max `f.hunger`); (2) tag `stew` (excluding items also tagged `avoid`) max `f.hunger`; (3) `AVOID_ORDER` first held whose condition holds: rotten_flesh (none), chicken (none), spider_eye (HP >= 8), poisonous_potato (HP >= 8), suspicious_stew (HP >= 12), pufferfish (HP >= 12 and hunger <= 2); (4) `chorus_fruit`; (5) the emergency list, only if `self.hp <= cfg.emergencyHp`. First step that yields an item wins. Guard `canEatSafely`. |
 | escape_teleport | `chorus_fruit` if held. |
 
 ---
@@ -356,9 +364,13 @@ Per situation:
 ```ts
 export interface CondEnv {
   p: Percept; e: EntityPercept; entry: MobEntry; cfg: CombatConfig;
-  hostile12: number;     // threats with distance <= cfg.countRadius (12), including e
+  hostile12: number;     // entities with classification "threat", relevance !== "irrelevant", distance <= cfg.countRadius (12), including e (= S2a 3.1)
   sameType12: number;    // of those, with e.typeId
-  botHasShield: boolean; // section 2
+  botHasShield: boolean; // = hasUsableShield(p, cfg), computed by brain.ts and passed in (stats.ts does not import scoring.ts)
+}
+export function makeCondEnv(p: Percept, e: EntityPercept, entry: MobEntry, cfg: CombatConfig, botHasShield: boolean): CondEnv {
+  const near = p.entities.filter(x => x.classification === "threat" && x.relevance !== "irrelevant" && x.distance <= cfg.countRadius);
+  return { p, e, entry, cfg, botHasShield, hostile12: near.length, sameType12: near.filter(x => x.typeId === e.typeId).length };
 }
 export function evalCondition(c: Condition, env: CondEnv): boolean {
   switch (c.kind) {
@@ -430,7 +442,7 @@ Duplicates (same name twice) keep the first. The result is rank-ordered, best fi
 
 ### 6.3 `selectTactic`
 
-`entry = mobOf(kb, target.typeId)`, `mobKey = entry.id`, `env` built for `target`.
+`entry = mobOf(kb, target.typeId)`, `mobKey = entry.id`, `env = makeCondEnv(p, target, entry, cfg, botHasShield)` (`botHasShield` is the last parameter of `selectTactic`).
 1. `cls = TACTIC_CLASS[option]`; empty: return `{ tactic: undefined, explored: false }`.
 2. **Keep:** if `s.tactic` has `targetId === target.id`, `s.tactic.name` is in `cls`, it is not banned, and either its rule's `when` holds or has been false for `< cfg.tacticGraceTicks` (20) (`condFalseSince` bookkeeping; a tactic whose gate fails counts as "false"): return it, no rng.
 3. `allowed = allowedTactics(...)`. Empty: `{ tactic: TACTIC_FALLBACK[option], explored: false }` (the fallback is not banned-checked).
@@ -518,7 +530,7 @@ Commit `{attack, since 100, until 124}`.
 `now = 140`, commit `{attack, since 100, until 124}`, `m = {attack 0.55, retreat 0.70, flee 0.40, eat 0.30}`. `best = retreat`. Window over. `threshold = 0.55 + 0.55 x 0.15 = 0.6325`; `0.70 > 0.6325`: switch. New commit `{retreat, since 140, until 140 + 60 = 200}`. `tactic = retreat_and_regen`, `moveTo = home.pos` (same dimension). Then at `now = 144`, `m = {retreat 0.52, attack 0.80}`: `144 < 200`, window holds `retreat`; only `flee`/`escape_rejoin` could bypass it.
 
 **E3. Hard interrupts.**
-(a) `now = 164`, `hp = 5`, a zombie at 3.0, commit `{attack, since 160, until 184}` (inside the window). Raw: attack 0.90, retreat 0.50, flee 0.45, eat 0.40 (food held and guard passes? a zombie at 3.0 fails the normal guard, so `food = undefined` and eat is masked), shield 0.30, back_off 0.20, resume_task 0.10, escape_rejoin 0.35 but `escapeAvailable = false` so masked. H1: `5 <= 6` and threat within 16: commit cleared; critical mask hides attack and resume_task. `m = {retreat 0.50, flee 0.45, shield 0.30, back_off 0.20}`. Pick `retreat` (`interrupt:critical_hp`), new commit until 224.
+(a) `now = 164`, `hp = 5`, a zombie at 3.0, commit `{attack, since 160, until 184}` (inside the window). Raw: attack 0.90, retreat 0.50, flee 0.45, eat 0.40 (a zombie at 3.0 makes `d.canEatSafely` false, so `chooseEat` returns `undefined` and eat is masked), shield 0.30, back_off 0.20, resume_task 0.10, escape_rejoin 0.35 but `escapeAvailable = false` so masked. H1: `5 <= 6` and threat within 16: commit cleared; critical mask hides attack and resume_task. `m = {retreat 0.50, flee 0.45, shield 0.30, back_off 0.20}`. Pick `retreat` (`interrupt:critical_hp`), new commit until 224.
 (b) `now = 200`, `hp = 18`, commit `{attack, targetId "z1"}`; `z1` died and is absent. H2 fires; commit cleared; normal argmax picks `attack` (0.70) with `selectTarget` returning a new zombie `z2`.
 (c) `now = 212`, commit `{eat, food bread (non-emergency), until 236}`, a zombie at 2.6 (`<= 3`). H3 fires: commit cleared, `eatBanUntil = 212 + 20 = 232`, eat is masked until tick 232.
 (d) `now = 344`, `lastTick = 300` (a lava reflex ran): `gap = 44 > 20` so H4 (`reflex_gap`); `44 > 40` so the engagement ends A8 (abandon).
@@ -534,12 +546,12 @@ Bot: iron sword (6 damage). `attackSpacingTicks 12`, `ttkReach 2.5`, `sprintBloc
 
 Order: tier 1 by ttk (Z 50, S 72), then tier 2 (C). Target = Z. Variants: creeper at 3.8 blocks becomes tier 0 and is picked first (and displaces a sticky Z, since tier 0 < tier 1). Skeleton with 5 hp: hits 1, ttk = 12 + 24 = 36 < 50, so S first. Creeper still at 4.5 while Z is the current target: Z stays.
 
-**E5. Food choice per situation** (`eatGuardThreatSpeed 5`, `eatGuardMargin 2`).
+**E5. Food choice per situation** (guards come from S2a `Derived`: `canEatSafely` needs the nearest threat more than `32 + 20 = 52` ticks from contact at the floor speed 0.25 blocks/tick; a zombie has reach 2, so that is more than 15.0 blocks).
 - *topup:* hunger 14, sat 2, hp 20, no threat; 5 bread (slot 0), 2 cooked_beef (1), 1 golden_apple (2). Trigger: `14 <= 17`, `missing = 6 >= 2`. Tag `topup` has bread (tags topup, main); cooked_beef is `main` only; golden_apple is `emergency`. First tag with items: `topup`. `bread.hunger 5 <= 6`: eat bread, slot 0. Result hunger 19, sat `min(19, 2 + 6) = 8`. Variant: hunger 17, missing 3: bread 5 > 3, no fit; smallest in the tag = bread, overflow `5 - 3 = 2 <= 2`: eat bread. (An item with `hunger - missing > 2` is never eaten as topup.)
-- *pre_engage_heal:* hunger 14, sat 2, hp 12/20, zombies targeting at 20 blocks. Tag `main` first: bread (gain `min(min(20, 19), 2 + 6) - 2 = 8 - 2 = 6`), cooked_beef (`min(min(20, 22), 2 + 12.8) - 2 = 14.8 - 2 = 12.8`). Pick cooked_beef. Guards: normal `20 > 32/20 x 5 + 2 = 10` passes; contact `20 / 5 x 20 = 80 >= 32 + 20 = 52` passes. At 12 blocks: `12 > 10` passes but contact `12/5 x 20 = 48 < 52` fails: `undefined`.
-- *emergency:* hp 6, hunger 14, three zombies at 10: triggers (1) and (4). Emergency list: golden_apple (EGA not held). No melee within 2: allowed. `eatMode = emergency`. With a zombie at 1.5 and hp 6: melee within 2 and `6 > 4`: emergency returns `undefined`; situation 4 fails its guard too; eat is masked.
+- *pre_engage_heal:* hunger 14, sat 2, hp 12/20, zombies targeting at 20 blocks. Tag `main` first: bread (gain `min(min(20, 19), 2 + 6) - 2 = 8 - 2 = 6`), cooked_beef (`min(min(20, 22), 2 + 12.8) - 2 = 14.8 - 2 = 12.8`). Pick cooked_beef. Guard `ctx.canEatSafely` = `d.canEatSafely`: `minEatContactTicks = (20 - 2) / 0.25 = 72 > 52`, true, passes. At 12 blocks: `(12 - 2) / 0.25 = 40 > 52` false, so `canEatSafely` is false and the situation returns `undefined`. Boundary: a zombie at exactly 15.0 gives `52 > 52` false (strict); at 15.1 gives `52.4 > 52`, true.
+- *emergency:* hp 6, hunger 14, three zombies at 10: triggers (1) and (4). Emergency list: golden_apple (EGA not held). `d.canEatEmergency` true (no melee within 2): allowed. `eatMode = emergency`. With a zombie at 1.5 and hp 6: `d.canEatEmergency` false (melee within 2 and `6 > 4`): emergency returns `undefined`; situation 4 fails its guard too; eat is masked.
 - *starving:* hunger 3, hp 14, 3 rotten_flesh, 1 spider_eye, 2 chicken, 1 pufferfish, no threats. Trigger (3): nothing in topup/main/raw. Steps 1-2 empty; AVOID_ORDER: rotten_flesh first. Later (hunger 7): still `<= 6`? No (7 > 6), the starving trigger ends and the bot stops eating junk. Pufferfish never (needs hp >= 12 and hunger <= 2 and everything above exhausted).
-- *escape_teleport:* hp 4, zombie at 1, `escapeAvailable = false`, 1 chorus_fruit, 1 cooked_beef, no golden apple. Triggers: (1) `4 <= 6` and threat within 16, but the emergency list is empty so `undefined`; (2) holds; chorus_fruit guard: melee within 2 and `hp 4 > 4` is false, allowed. Result chorus_fruit, `emergency = true`.
+- *escape_teleport:* hp 4, zombie at 1, `escapeAvailable = false`, 1 chorus_fruit, 1 cooked_beef, no golden apple. Triggers: (1) `4 <= 6` and threat within 16, but the emergency list is empty so `undefined`; (2) holds; chorus_fruit guard `d.canEatEmergency`: melee within 2 but `hp 4 > 4` is false, so true, allowed. Result chorus_fruit, `emergency = true`.
 
 **E6. Tactic choice with stats (rng shown).**
 Zombie (adult, `ground_flat`, 1 zombie in 12 blocks, no shield). Entry order: melee_crit (`not_mob_is_baby AND ground_flat AND count_at_least: 1`: true), melee_strafe (`mob_is_baby`: false), shield_hold (`count_at_least: 3`: false, and gated), hit_and_back_off (`always`: true). `allowed = [melee_crit (rank 0), hit_and_back_off (rank 1)]`.
@@ -588,10 +600,8 @@ Merged into `config.combat` (`CombatConfig`). Bias: survival first (large `criti
 | `emergencyHostileRange` | 16 | blocks | "Hostile within 16" |
 | `starvingHunger` | 6 | hunger | Starving trigger |
 | `poisonMinHp` | 8 | HP | Minimum HP to eat poison items |
-| `eatGuardThreatSpeed` | 5 | blocks/s | Threat speed in the eat guards |
-| `eatGuardMargin` | 2 | blocks | Margin of the normal eat guard |
-| `eatMeleeBlockDist` | 2 | blocks | Emergency/escape eat refused with a melee threat this close (hp > 4) |
-| `preEngageContactMarginTicks` | 20 | ticks | Extra time-to-contact for `pre_engage_heal` |
+| `eatGuardThreatSpeed` | 5 | blocks/s | Floor on a threat's speed in S2a's `eatContactTicks` (read by S2a, D23) |
+| `eatMeleeBlockDist` | 2 | blocks | Emergency/escape eat refused with a melee threat this close (hp > 4); read by S2a `canEatEmergency` |
 | `statsEpsilon` | 0.10 | probability | Exploration rate |
 | `statsMinSamples` | 3 | count | Samples before measured stats replace the prior |
 | `statsPriorTop` | 0.60 | utility | Prior of rank 0 |
@@ -616,7 +626,7 @@ Merged into `config.combat` (`CombatConfig`). Bias: survival first (large `criti
 | `engageGapTicks` | 40 | ticks | Brain gap that abandons the engagement |
 | `engageMaxTicks` | 1200 | ticks | Hard cap on one engagement |
 
-Collision rule: if S1 or S2a already define a key with one of these names, the Reconciler keeps one definition and the one default above.
+Collision rule: if S1 or S2a already define a key with one of these names, the Reconciler keeps one definition and the one default above. D3: `criticalHp` and `switchMargin` are defined here only (S2a reads `criticalHp`). Removed by D23: `eatGuardMargin`, `preEngageContactMarginTicks` (nothing reads them; S2a owns `eatSafetyMarginTicks` 20 and `eatMidMealMarginTicks` 6). The type of this table is `CombatConfigS2b` (`CombatConfig = CombatConfigS1 & CombatConfigS2b & CombatConfigS2a`, S2a 9.1); the contract writer creates it.
 
 ---
 
@@ -627,7 +637,7 @@ Collision rule: if S1 or S2a already define a key with one of these names, the R
 | S1 / contract writer | Add the optional Percept and EntityPercept fields of section 0 (`terrain`, `canBlock`, `shieldDisabled`, `objectiveItemIds`, `tacticFeedback`, `EntityPercept.inWater`). |
 | S1 / B3 | Compute `TerrainFacts` from the world (S3 `scan.ts` helpers) at most every 20 ticks while in combat; fill `tacticFeedback` from the finished `TacticRunner` (`reason`) for one pump; fill `objectiveItemIds` from `ObjectiveHint.items.ids` (also while paused). |
 | S1 | Bind `BrainFn` to `decide` as shown in section 1; `BrainState` has no provocation field. |
-| S2a | Do not define `FoodSituation`, `FoodChoice`, `Commit`; export `Knowledge` members used by `mobOf`/`foodOf`/`valueOf`. `FoodEntry` needs `tags`. |
+| S2a | Done by S2a (checked in the revision pass): `Knowledge` exports `mob`, `food`, `value` (D1); `FoodEntry` has `tags` and `effects`; `hasUsableShield`, `ALWAYS_EDIBLE`, `EMERGENCY_FOODS`, `ATTACK_NEAR_BLOCKS` are exported from `scoring.ts`; `Derived.canEatSafely` / `canEatEmergency` are the eat guards (D23). S2a does not define `FoodSituation`, `FoodChoice`, `Commit`, `Decision`. |
 | S3 | `Decision.eatMode` and `foodSlot` map to `EatRequest.mode`/`slot`. `TacticRunner.reason` is the feedback reason; a runner that returns `failed` on its first step must still be reported once. |
 | S4a | Store `serializeStats(state.stats)` as an opaque string per bot; call `parseStats` on restore. |
 | S6 | Test cases in section 11. |
@@ -636,15 +646,17 @@ Collision rule: if S1 or S2a already define a key with one of these names, the R
 
 | # | Question | Fallback |
 |---|---|---|
-| Q1 | S2a's `Knowledge` member names are unknown while S2a is written in parallel. | `mobOf`/`foodOf`/`valueOf` accessors (section 0); Reconciler maps them. |
+| Q1 | S2a's `Knowledge` member names were unknown while S2a was written in parallel. | Resolved (D1): `kb.mob`, `kb.food`, `kb.value` as S2a 1.1 defines them; `mobOf`/`foodOf`/`valueOf` are one-line aliases. |
 | Q2 | The brief lists "creeper within 4" after "threatening_me". | Creeper within 4 is tier 0 and pre-empts (section 4). |
 | Q3 | Bedrock gives no signal that a target died. | Win = target gone for 8 ticks after being hit within 8 blocks; teleporters/hiders need a low last hp. Mis-attributions only skew stats, never behaviour. |
 | Q4 | Stats from fights with many mobs are noisy. | Not recorded when more than 2 threats were within 12 blocks (`skipped`). |
-| Q5 | `criticalHp` and `switchMargin` may also exist in S2a. | Single definition, defaults of section 8. |
+| Q5 | `criticalHp` and `switchMargin` may also exist in S2a. | Resolved (D3): single definition here (section 8); S2a only reads `criticalHp`. |
 | Q6 | Tactic runner failure is invisible to a pure brain. | `Percept.tacticFeedback` plus a 200-tick ban; without it (`undefined`) a failing tactic is retried each reselection. |
 | Q7 | `ground_flat` and the other terrain atoms are not in S1's Percept. | `Percept.terrain?`; missing means `groundFlat` true and cover/ceiling/roof false. |
 | Q8 | Stats are per bot, so each bot learns alone. | Accepted for Phase 3; Phase 8 merges logs offline. |
 | Q9 | `hunger` unreadable (`hungerKnown = false`). | Treated as 20: only always-edible foods are eaten. |
+| Q10 | `Derived.canEatSafely` is computed for S2a's reference meal (`eatTicksRef`: the heal, starve or topup pick, default 32 ticks), not for the food S2b finally picks. | Accepted (D23 forbids a second threshold). The error is at most 8 ticks (honey_bottle 40 vs 32) and in the safe direction for dried_kelp (16). |
+| Q11 | A committed meal bypasses the guard in `chooseEat`. | Intended (D22): S2a scores `eat` with the mid-meal margin when `Percept.eating` is set; H3 stays the hard interrupt. Without `Percept.eating`, S2a falls back to the full margin and its `eat` score drops to 0, so the brain leaves `eat` after the commit window. |
 
 ## 11. Test cases for S6 / TC-B1
 
@@ -652,8 +664,23 @@ Collision rule: if S1 or S2a already define a key with one of these names, the R
 - `holdOrSwitch`: E1/E2 numbers, negative scores, calm options exempt, escape/flee bypass the window, infeasible committed option.
 - `decide`: H1 to H4 (E3), critical mask, masks table row by row, `reason` codes, no mutation of the input state, `eat` ban after H3, sticky food, `minCommitTicks` eat uses `eatTicks + 4` (dried_kelp: `max(36, 20) = 36`).
 - `selectTarget`: E4 incl. variants and stickiness, leash exclusion (17 blocks, blocking), tie by id.
-- `chooseFood`: E5 plus topup with `hunger 20` (nothing except always-edible), objective item excluded, guard at exactly `dn = 10` (fails, strict `>`), pre-engage contact `12 -> fail`, `golden_carrot` never topup, honey bottle at hunger 20.
+- `chooseFood`: E5 plus topup with `hunger 20` (nothing except always-edible), objective item excluded, guard injected through `FoodContext.canEatSafely` / `canEatEmergency` (false gives `undefined` for normal, pre_engage_heal and starving; `canEatEmergency` false gives `undefined` for emergency and escape_teleport), an end-to-end boundary through `computeDerived` (zombie at 15.0 fails, 15.1 passes), committed meal returned by `chooseEat` without the guard, `golden_carrot` never topup, honey bottle at hunger 20.
 - `evalCondition`: every atom row; `OR`/`AND` precedence (S3 2.2 round-trip strings); slime sizes by hp and by box.
 - `selectTactic`: E6 with scripted `rng`, `rng` call counts (0, 1 or 2), bans, grace period, fallback tactic.
 - Engagement: E7 win/loss/abandon rules A1-A8, clean flag, decay at `n > 30`, `onBotDeath` loss `damageTaken + lastHp`.
 - `serializeStats`/`parseStats`: round-trip, rejects `v: 2`, drops an entry with a negative number or an unknown tactic.
+
+---
+
+## Revision log (review pass 1)
+
+No review file exists for S2b (`docs/phase3/reviews/S2b-*.md`); this pass applies DECISIONS rows D1, D3, D22, D23 and aligns the S2a names with the revised S2a.
+
+- D1: applied (section 0: `kb.mob`, `kb.food`, `kb.value` are exactly S2a 1.1's `Knowledge` members; `value(typeId, maxAmount?)` is called with one argument; Q1 resolved; the "Reconciler maps" wording removed; `FoodEntry`/`FoodTag`/`FoodEffect` read from S2a, `effects` added to the fields read; section 9 S2a row rewritten as done)
+- D3: applied (header and section 8 collision rule: `criticalHp` and `switchMargin` have one definition here, S2a reads `criticalHp`; Q5 resolved)
+- D22 shield: applied (local `botHasShield` removed; `hasUsableShield` imported from `scoring.ts`; the shield mask uses it; `CondEnv.botHasShield` is passed in)
+- D22 committed meal: applied (`chooseEat` returns the sticky `s.commit.food` while `stillHeld`, before any guard; step 11 simplified; Q11)
+- D22 stats.ts: applied (`evalCondition` and `CondEnv` exported from `stats.ts`; new `makeCondEnv`; `selectTactic` gains the parameter `botHasShield: boolean` because `stats.ts` cannot import `scoring.ts`; header import rule; `hostile12` defined as S2a 3.1)
+- D23: applied (`FoodContext` gains `canEatSafely` and `canEatEmergency`; `chooseEat(p, s, d, kb, cfg)` fills them from `Derived`; section 5.2 guards replaced; keys `eatGuardMargin` and `preEngageContactMarginTicks` removed from section 8, `eatGuardThreatSpeed` and `eatMeleeBlockDist` kept because S2a reads them; E5 and E3(a) arithmetic redone with the 52-tick rule; section 11 chooseFood test updated; the RECOVER `chooseFood` dep passes both guards as true; Q10 records that `canEatSafely` uses S2a's reference meal length)
+- S2a name alignment: `computeDerived(p, kb, cfg)` and `scoreOptions(p, d, kb, cfg)` match S2a 1.3; `Derived.canEatSafely` / `canEatEmergency` are the only two fields read (section 0 says so); `ALWAYS_EDIBLE`, `EMERGENCY_FOODS`, `ATTACK_NEAR_BLOCKS` imported instead of redefined; `FoodContext.threats` filtered by `cfg.scanRadius` to equal S2a's `Derived.threats` set
+- Requested of others: the S1 and contract-writer revisers use `CombatConfigS2b` as the interface name of section 8 and take `makeCondEnv` / the new `selectTactic` parameter into the brain wiring; any other document that mentions `eatGuardMargin` or `preEngageContactMarginTicks` must drop them
