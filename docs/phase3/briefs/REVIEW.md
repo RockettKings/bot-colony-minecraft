@@ -26,3 +26,13 @@ Paths are relative to `docs/phase3/`. Docs in your group may cross-reference the
 | # | Severity (blocker/major/minor) | Location (§ / line) | Problem | Exact fix (replacement text, number, or decision) |
 ```
 Every finding must carry an **exact fix**: a replacement sentence, a value or a decision. A reviser applies it mechanically. If there are no problems, write "No findings" and stop.
+
+## Pass 2 (2026-10-09)
+- **Output name:** write findings to `docs/phase3/reviews/<DOC>--<lens>--p2.md`. Never overwrite pass-1 files.
+- **Already decided:** read `docs/phase3/DECISIONS.md` first. Every `decided` row is settled, so don't re-raise it. D31 is `open`: check each item in it and report it as a finding (closed, or the exact fix still needed).
+- **Revision logs:** each doc now ends with `## Revision log (review pass 1)`. Don't review the log itself. Review the doc text.
+- **Groups for pass 2:**
+  - **new:** S2a, S2b, S4a, S4b, all 5 lenses.
+  - **seam-A:** consistency between S1, S3 and S6 and every other doc.
+  - **seam-B:** consistency between S5, MOBS, TABLES and API-MAP and every other doc.
+  - For a seam group, only flag cross-doc mismatches (names, fields, signatures, config keys, ids, ownership), plus anything the pass-1 revisions broke inside the doc.
